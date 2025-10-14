@@ -1,0 +1,118 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "athena:StartQueryExecution",
+        "athena:StopQueryExecution",
+        "athena:BatchGetQueryExecution",
+        "athena:GetQueryExecution",
+        "athena:GetQueryResults",
+        "athena:GetQueryResultsStream",
+        "athena:GetQueryRuntimeStatistics",
+        "athena:ListQueryExecutions",
+        "athena:BatchGetNamedQuery",
+        "athena:GetNamedQuery",
+        "athena:ListNamedQueries",
+        "athena:GetDataCatalog",
+        "athena:ListDataCatalogs",
+        "athena:GetDatabase",
+        "athena:GetTableMetadata",
+        "athena:ListDatabases",
+        "athena:ListTableMetadata",
+        "athena:GetWorkGroup",
+        "athena:ListWorkGroups",
+        "glue:GetDatabase*",
+        "glue:GetTable*",
+        "glue:GetPartition*",
+        "glue:GetCrawler*",
+        "glue:GetConnection*",
+        "glue:GetDatabases",
+        "glue:GetTables",
+        "glue:ListCrawlers",
+        "glue:SearchTables",
+        "glue:GetJobRun",
+        "glue:GetJobRuns",
+        "glue:GetJob",
+        "glue:GetJobs",
+        "glue:GetJobBookmark",
+        "glue:GetUsageProfile",
+        "glue:GetSecurityConfiguration",
+        "glue:GetDataCatalogEncryptionSettings",
+        "glue:GetResourcePolicy",
+        "glue:GetSession",
+        "glue:ListSessions",
+        "glue:GetStatement",
+        "glue:ListStatements",
+        "glue:GetWorkflow",
+        "glue:ListWorkflows",
+        "glue:GetTrigger",
+        "glue:GetTriggers",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning",
+        "s3:ListBucketVersions",
+        "cloudwatch:GetMetricData",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "elasticmapreduce:DescribeCluster",
+        "elasticmapreduce:ListClusters",
+        "elasticmapreduce:DescribeStep",
+        "elasticmapreduce:ListSteps",
+        "elasticmapreduce:ListInstances",
+        "elasticmapreduce:GetManagedScalingPolicy",
+        "elasticmapreduce:DescribeStudio",
+        "elasticmapreduce:ListStudios",
+        "elasticmapreduce:DescribeNotebookExecution",
+        "elasticmapreduce:ListNotebookExecutions",
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::aws-public-blockchain",
+        "arn:aws:s3:::aws-public-blockchain/*",
+        "arn:aws:s3:::aws-athena-query-results-*",
+        "arn:aws:s3:::aws-athena-query-results-*/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectAcl",
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::PLACEHOLDER_ATHENA_RESULTS_BUCKET",
+        "arn:aws:s3:::PLACEHOLDER_ATHENA_RESULTS_BUCKET/*"
+      ]
+    },
+    {
+      "Sid": "CreateBedrockAgentCoreRuntimeIdentityServiceLinkedRolePermissions",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/runtime-identity.bedrock-agentcore.amazonaws.com/AWSServiceRoleForBedrockAgentCoreRuntimeIdentity",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": "runtime-identity.bedrock-agentcore.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
