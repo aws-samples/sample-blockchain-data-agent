@@ -18,7 +18,7 @@ This project demonstrates how to build an intelligent blockchain data analysis a
 - **Python 3.10+** (use `uv` or `pyenv` to manage Python versions)
 - **pip** (have a version of pip installed that's compatible with your Python version)
 - **AWS CLI** (if developing locally, use `aws configure` to set up credentials)
-- **AWS Bedrock model access** (use the AWS Console to enable the required foundation models, such as Claude Sonnet 4)
+- **Amazon Bedrock model access** (use the AWS Console to enable the required foundation models, such as Claude Sonnet 4)
 
 ### 1. Install Dependencies
 
