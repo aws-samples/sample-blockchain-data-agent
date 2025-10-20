@@ -1,4 +1,4 @@
-# Data Processing Agent with Strands Agents on AWS
+# Blockchain Data Processing Agent with Strands Agents on AWS
 
 This project demonstrates how to build an intelligent blockchain data analysis agent using the [Strands Agents](https://strandsagents.com) framework with the Model Context Protocol (MCP) to integrate with the `awslabs.aws-dataprocessing-mcp-server`.
 
