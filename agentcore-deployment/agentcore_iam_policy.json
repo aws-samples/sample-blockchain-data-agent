@@ -113,6 +113,20 @@
           "iam:AWSServiceName": "runtime-identity.bedrock-agentcore.amazonaws.com"
         }
       }
-    }
+    },
+    {
+			"Effect": "Allow",
+			"Action": [
+				"aws-marketplace:ViewSubscriptions"
+			],
+			"Resource": "*"
+		},
+    {
+			"Effect": "Allow",
+			"Action": [
+				"aws-marketplace:Subscribe"
+			],
+			"Resource": "us.anthropic.claude-sonnet-4-20250514-v1:0"
+		}
   ]
 }
