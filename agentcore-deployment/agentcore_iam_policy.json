@@ -70,8 +70,6 @@
         "ecr:GetAuthorizationToken",
         "ecr:BatchGetImage",
         "ecr:GetDownloadUrlForLayer",
-        "bedrock:InvokeModel",
-        "bedrock:InvokeModelWithResponseStream",
         "sts:GetCallerIdentity"
       ],
       "Resource": "*"
@@ -115,18 +113,34 @@
       }
     },
     {
-			"Effect": "Allow",
-			"Action": [
-				"aws-marketplace:ViewSubscriptions"
-			],
-			"Resource": "*"
-		},
-    {
-			"Effect": "Allow",
-			"Action": [
-				"aws-marketplace:Subscribe"
-			],
-			"Resource": "us.anthropic.claude-sonnet-4-20250514-v1:0"
-		}
-  ]
+        "Sid": "AllowAnthropicAndAmazonModelsOnly",
+        "Effect": "Allow",
+        "Action": [
+            "bedrock:InvokeModel",
+            "bedrock:InvokeModelWithResponseStream"
+        ],
+        "Resource": [
+            "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0"
+        ]
+      },
+      {
+        "Sid": "AllowOnlySpecificMarketplaceSubscription",
+        "Effect": "Allow",
+        "Action": [
+            "aws-marketplace:ViewSubscriptions",
+            "aws-marketplace:Subscribe"
+        ],
+        "Resource": "*",
+        "Condition": {
+            "ForAllValues:StringEquals": {
+                "aws-marketplace:ProductId": [
+                    "prod-4pmewlybdftbs"
+                ]
+            },
+            "StringEquals": {
+                "aws:CalledViaLast": "bedrock.amazonaws.com"
+            }
+        }
+      }
+    ]
 }
