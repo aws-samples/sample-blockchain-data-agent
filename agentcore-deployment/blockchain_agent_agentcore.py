@@ -70,7 +70,7 @@ def initialize_blockchain_agent():
         mcp_client = MCPClient(lambda: stdio_client(
             StdioServerParameters(
                 command="uvx",
-                args=["awslabs.aws-dataprocessing-mcp-server@latest"]
+                args=["--with","mcp==1.18.0","awslabs.aws-dataprocessing-mcp-server@latest"]
             )
         ))
         
