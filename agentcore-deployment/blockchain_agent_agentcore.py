@@ -27,7 +27,7 @@ Role: You are a blockchain data processing agent who can use AWS tools to identi
 
 If you receive an ERROR from Athena, create another query to resolve the error message, and try to run it again. If there are 0 rows returned in the result set, specify that there were no results.
 
-For blockchain data queries, you can use the AWSPublicBlockchain workgroup in Athena.
+For blockchain data queries, you can use the AwsDataCatalog within the AWSPublicBlockchain workgroup in Athena.
 Make sure that you properly return scientific notation values.
 
 Example Databases and Tables:
@@ -70,37 +70,33 @@ def initialize_blockchain_agent():
         mcp_client = MCPClient(lambda: stdio_client(
             StdioServerParameters(
                 command="uvx",
-                args=["--with","mcp==1.18.0","awslabs.aws-dataprocessing-mcp-server@latest"]
+                args=["awslabs.aws-dataprocessing-mcp-server@latest"]
             )
         ))
         
-        # Get tools from MCP server
-        with mcp_client:
-            tools = mcp_client.list_tools_sync()
-            
-            if not tools:
-                raise Exception("No tools available from AWS Data Processing MCP server")
-            
-            # Create an instance of BedrockModel to define foundation model and parameters
-            bedrock_model = BedrockModel(
-                model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
-                temperature=0.0,
-                top_p=1.0,
-                cache_prompt="default" #cache system prompt with 5min TTL, reduces token usage for repeat prompts
-            )
-            
-            # Create Strands agent with Claude Sonnet 4 and blockchain expertise
-            agent = Agent(
-                model=bedrock_model,
-                tools=tools,
-                name="AWS Blockchain Data Processing Assistant",
-                system_prompt=agent_instruction
-            )
-            
-        print("✅ Blockchain Agent initialized for AgentCore")
+        # Create an instance of BedrockModel to define foundation model and parameters
+        bedrock_model = BedrockModel(
+            model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+            temperature=0.0,
+            top_p=1.0,
+            cache_prompt="default" #cache system prompt with 5min TTL, reduces token usage for repeat prompts
+        )
+        
+        # Create Strands agent with MCP client using Managed Integration
+        # The agent will handle MCP connection lifecycle automatically
+        agent = Agent(
+            model=bedrock_model,
+            tools=[mcp_client],  # Pass MCP client directly - managed integration
+            name="AWS Blockchain Data Processing Assistant",
+            system_prompt=agent_instruction
+        )
+        
+        print("✅ Blockchain Agent initialized for AgentCore with managed MCP integration")
         
     except Exception as e:
         print(f"❌ Failed to initialize blockchain agent: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 
@@ -121,7 +117,7 @@ async def invoke_streaming(payload):
     """
     try:
         # Extract user prompt
-        user_message = payload.get("prompt", "")
+        user_message = payload["prompt"]
         if not user_message:
             yield {
                 "error": "No prompt found in input. Please provide a 'prompt' key in the input.",
@@ -129,52 +125,26 @@ async def invoke_streaming(payload):
             }
             return
         
-        # Stream agent response using MCP client context
-        with mcp_client:
-            async for event in agent.stream_async(user_message):
-                yield event
+        # Stream agent response - MCP lifecycle managed automatically by agent
+        stream = agent.stream_async(user_message)
+        async for event in stream:
+            if "data" in event:
+                yield event["data"]
+            if "tool_use" in event:
+                tool_info = event["tool_use"]
+                tool_name = tool_info.get("name", "Unknown")
+                tool_input = tool_info.get("input", {})
+
+                # Format the tool call as a special marker that can be easily detected by the client
+                yield f"\n\n<tool_call>\n"
+                yield f"name: {tool_name}\n"
+                yield f"params: {tool_input}\n"
+                yield f"</tool_call>\n\n"
+
                 
     except Exception as e:
         yield {
             "error": f"Agent streaming failed: {str(e)}",
-            "status": "error"
-        }
-
-
-@app.entrypoint
-def invoke_sync(payload):
-    """
-    Synchronous AgentCore entrypoint (fallback).
-    
-    Args:
-        payload: Request payload from AgentCore
-        
-    Returns:
-        Response dictionary
-    """
-    try:
-        # Extract user prompt
-        user_message = payload.get("prompt", "")
-        if not user_message:
-            return {
-                "error": "No prompt found in input. Please provide a 'prompt' key in the input.",
-                "status": "error"
-            }
-        
-        # Process request synchronously using MCP client context
-        with mcp_client:
-            response = agent(user_message)
-            
-            return {
-                "result": str(response),
-                "status": "success",
-                "agent": "blockchain-data-processing",
-                "version": "agentcore-1.0.0"
-            }
-            
-    except Exception as e:
-        return {
-            "error": f"Agent processing failed: {str(e)}",
             "status": "error"
         }
 
