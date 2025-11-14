@@ -100,6 +100,43 @@ python deploy_with_docker.py \
   --skip-test                        # Skip agent testing
 ```
 
+## Deployment on AWS Cloudshell or other non-ARM64 machines
+
+### Step 1: Install Docker and Buildx
+
+```
+sudo dnf update -y
+# Remove old version
+sudo dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine
+# Install dnf plugin
+sudo dnf -y install dnf-plugins-core
+# Add CentOS repository
+sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+# Adjust release server version in the path as it will not match with Amazon Linux 2023
+sudo sed -i 's/$releasever/9/g' /etc/yum.repos.d/docker-ce.repo
+# Install as usual
+sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+### Step 2: Set up Buildx Builder for cross-platform builds
+
+```
+# Install Quick EMUlator (QEMU) binfmt handlers
+docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+# Verify QEMU is registered
+ls /proc/sys/fs/binfmt_misc/ | grep qemu
+
+
+# Create new builder with explicit platform support
+docker buildx create --name multiarch --driver docker-container --platform linux/amd64,linux/arm64 --use
+
+# Bootstrap (downloads buildkit)
+docker buildx inspect --bootstrap
+
+#once these steps are complete, you can run the Docker deployment script
+```
+
 ## Files Used
 
 ### Required Files

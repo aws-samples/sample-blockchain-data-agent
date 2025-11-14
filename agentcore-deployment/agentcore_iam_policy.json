@@ -107,7 +107,10 @@
         "Action": [
             "logs:GetLogEvents",
             "logs:DescribeLogGroups",
-            "logs:DescribeLogStreams"
+            "logs:DescribeLogStreams",
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents"
         ],
         "Resource": [
             "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/*",
