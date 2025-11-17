@@ -115,6 +115,9 @@ class AgentChat:
     def stream_response(self, response):
         if "text/event-stream" in response.get("contentType", ""):
             complete_text = ""
+            in_tool_call = False
+            tool_buffer = ""
+            
             for line in response["response"].iter_lines(chunk_size=1):
                 if line:
                     line = line.decode("utf-8")
@@ -129,15 +132,58 @@ class AgentChat:
                                     parsed_chunk, ensure_ascii=False
                                 )
                                 text_chunk += "\n\n"
-                            console.print(text_chunk, end="")
-                            # print(text_chunk, end="")
+                            
+                            # Detect tool call markers
+                            if "<tool_call>" in text_chunk:
+                                in_tool_call = True
+                                tool_buffer = ""
+                                console.print("\n[bold yellow]🔧 Tool Call:[/bold yellow]", end="")
+                                continue
+                            elif "</tool_call>" in text_chunk:
+                                in_tool_call = False
+                                # Parse and format the tool call
+                                self._format_tool_call(tool_buffer)
+                                console.print()
+                                continue
+                            
+                            # Buffer tool call content
+                            if in_tool_call:
+                                tool_buffer += text_chunk
+                            else:
+                                # Regular response text
+                                console.print(text_chunk, end="", style="white")
+                            
                             complete_text += text_chunk
                         except json.JSONDecodeError:
                             console.print(json_chunk)
-                            # print(json_chunk)
                             continue
+            
             console.print()
             return {}
+    
+    def _format_tool_call(self, tool_buffer):
+        """Format and display tool call information"""
+        lines = tool_buffer.strip().split('\n')
+        tool_name = None
+        tool_params = None
+        
+        for line in lines:
+            if line.startswith("name:"):
+                tool_name = line.split("name:", 1)[1].strip()
+            elif line.startswith("params:"):
+                tool_params = line.split("params:", 1)[1].strip()
+        
+        if tool_name:
+            console.print(f"\n  [cyan]Tool:[/cyan] {tool_name}")
+        if tool_params:
+            try:
+                # Try to pretty-print JSON params
+                params_dict = eval(tool_params)
+                console.print(f"  [cyan]Parameters:[/cyan]")
+                for key, value in params_dict.items():
+                    console.print(f"    • {key}: [dim]{value}[/dim]")
+            except:
+                console.print(f"  [cyan]Parameters:[/cyan] {tool_params}")
 
         elif response.get("contentType") == "application/json":
             # Handle standard JSON response

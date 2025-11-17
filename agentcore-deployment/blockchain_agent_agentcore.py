@@ -136,10 +136,16 @@ async def invoke_streaming(payload):
                 tool_input = tool_info.get("input", {})
 
                 # Format the tool call as a special marker that can be easily detected by the client
-                yield f"\n\n<tool_call>\n"
+                yield "\n<tool_call>\n"
                 yield f"name: {tool_name}\n"
                 yield f"params: {tool_input}\n"
-                yield f"</tool_call>\n\n"
+                yield "</tool_call>\n"
+            if "tool_result" in event:
+                # Optionally show tool results
+                tool_result = event["tool_result"]
+                yield "\n<tool_result>\n"
+                yield f"status: {tool_result.get('status', 'completed')}\n"
+                yield "</tool_result>\n"
 
                 
     except Exception as e:
