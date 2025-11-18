@@ -102,6 +102,22 @@
       ]
     },
     {
+        "Sid": "CloudWatchLogsAccess",
+        "Effect": "Allow",
+        "Action": [
+            "logs:GetLogEvents",
+            "logs:DescribeLogGroups",
+            "logs:DescribeLogStreams",
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents"
+        ],
+        "Resource": [
+            "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/*",
+            "arn:aws:logs:*:*:log-group:/aws/codebuild/*"
+        ]
+    },
+    {
       "Sid": "CreateBedrockAgentCoreRuntimeIdentityServiceLinkedRolePermissions",
       "Effect": "Allow",
       "Action": "iam:CreateServiceLinkedRole",

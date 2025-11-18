@@ -25,20 +25,23 @@ The agentcore-deployment directory contains an implementation of the blockchain 
 ```
 agentcore-deployment/
 ├── blockchain_agent_agentcore.py    # Main agent with AgentCore integration
-├── deploy_blockchain_agent.py       # Automated deployment script
+├── deploy_blockchain_agent.py       # Automated deployment script using Docker and Boto3
 ├── requirements.txt                 # Python dependencies
 ├── agentcore_iam_policy.json        # IAM policy for AgentCore agent
 ├── agentcore_iam_role.json          # IAM role for AgentCore agent
 ├── deployment_user_iam_policy.json  # IAM policy for *user/role* deploying to AgentCore
+├── invoke_agent_async.py            # Interactive chat interface to test the deployed agent
 └── README.md                        # This documentation
 ```
 
 ### 1️⃣ Pre-requisites
 
 - **Python 3.10+** (use `uv` or `pyenv` to manage Python versions)
+- **Docker and Docker Buildx** (required to build and deploy the agent)
 - **pip** (have a version of pip installed that's compatible with your Python version)
 - **AWS CLI** (if developing locally, use `aws configure` to set up credentials)
 - **AWS Bedrock model access** (use the AWS Console to enable the required foundation models, such as Claude Sonnet 4)
+- **Boto3** (used in the deployment script)
  
 
 
@@ -55,65 +58,16 @@ pip install -r requirements.txt
 ### 2. Deploy to AgentCore
 
 ```bash
-# Automated deployment with starter toolkit
-python3 deploy_blockchain_agent.py --agent-name "my_blockchain_data_agent" --skip-local-test
+# Automated deployment with Docker and Boto3
+python3 deploy_with_docker.py --agent-name "my_blockchain_data_agent" --region us-east-1
 
-# Or deploy manually (see Manual Deployment section)
 ```
 
-### 3. Test Deployment
+### 3. Test the Agent
 
 ```bash
-# Test the deployed agent
-agentcore invoke --agent "my_blockchain_data_agent" '{"prompt": "How many Bitcoin blocks have been mined today?"}' 
-```
-
-## 🔧 Deployment Options
-
-### Option A: Automated Deployment (Recommended)
-
-**What it does:**
-1. ✅ Checks prerequisites (AWS CLI, credentials, starter toolkit)
-2. ⚙️ Configures agent with AgentCore
-3. 🧪 Tests locally (optional, requires Docker/Finch/Podman)
-4. 🚀 Deploys to AWS AgentCore
-5. 🔬 Tests deployed agent
-
-
-The `deploy_blockchain_agent.py` script provides fully automated deployment:
-
-```bash
-# Full deployment with all checks
-cd agentcore-deployment
-python3 deploy_blockchain_agent.py --agent-name "my_blockchain_data_agent"
-
-# Skip local testing (if Docker not available)
-# ✅ **recommended**
-python3 deploy_blockchain_agent.py --agent-name "my_blockchain_data_agent" --skip-local-test
-
-# Skip deployment testing
-python3 deploy_blockchain_agent.py --agent-name "my_blockchain_data_agent" --skip-deployment-test
-```
-
-### Option B: Manual Deployment
-
-For more control over the deployment process:
-
-```bash
-# 1. Install AgentCore Starter Toolkit
-pip install bedrock-agentcore-starter-toolkit
-
-# 2. Configure agent
-agentcore configure --entrypoint blockchain_agent_agentcore.py --agent-name "my_blockchain_data_agent"
-
-# 3. Test locally (optional step)
-agentcore launch --local --agent-name "my_blockchain_data_agent"
-
-# 4. Deploy to AWS
-agentcore launch --agent-name "my_blockchain_data_agent"
-
-# 5. Test deployment
-agentcore invoke --agent-name "my_blockchain_data_agent" '{"prompt": "How many Bitcoin blocks have been mined today?"}'
+# Test the deployed agent with an interactive chat interface
+python3 invoke_agent_async.py --agent-name "my_blockchain_data_agent"
 ```
 
 ## 🏗️ Architecture
