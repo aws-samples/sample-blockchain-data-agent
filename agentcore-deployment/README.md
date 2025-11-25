@@ -37,8 +37,6 @@ agentcore-deployment/
 ├── agentcore_iam_role.json          # IAM role for AgentCore agent
 ├── deployment_user_iam_policy.json  # IAM policy for *user/role* deploying to AgentCore
 ├── invoke_agent_async.py            # Interactive chat interface to test the deployed agent
-├── GLOBAL_CRIS_MIGRATION.md         # Detailed Global CRIS migration guide
-├── GLOBAL_CRIS_QUICK_REFERENCE.md   # Quick reference for Global CRIS
 └── README.md                        # This documentation
 ```
 
