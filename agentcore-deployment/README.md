@@ -9,6 +9,12 @@ The agentcore-deployment directory contains an implementation of the blockchain 
 - Automatic HTTP server setup with `/invocations` and `/ping` endpoints
 - Built-in deployment tools via AgentCore Starter Toolkit
 
+### ✅ **Global Cross-Region Inference (CRIS)**
+- Uses Claude Sonnet 4 with Global CRIS for higher throughput
+- ~10% cost savings compared to regional inference
+- Automatic routing to optimal AWS region globally
+- Enhanced resilience during traffic spikes
+
 ### ✅ **Async Iterator Streaming**
 - Real-time streaming responses using `agent.stream_async()`
 - Efficient handling of large blockchain data queries
@@ -27,7 +33,7 @@ agentcore-deployment/
 ├── blockchain_agent_agentcore.py    # Main agent with AgentCore integration
 ├── deploy_blockchain_agent.py       # Automated deployment script using Docker and Boto3
 ├── requirements.txt                 # Python dependencies
-├── agentcore_iam_policy.json        # IAM policy for AgentCore agent
+├── agentcore_iam_policy.json        # IAM policy for AgentCore agent (includes Global CRIS)
 ├── agentcore_iam_role.json          # IAM role for AgentCore agent
 ├── deployment_user_iam_policy.json  # IAM policy for *user/role* deploying to AgentCore
 ├── invoke_agent_async.py            # Interactive chat interface to test the deployed agent
