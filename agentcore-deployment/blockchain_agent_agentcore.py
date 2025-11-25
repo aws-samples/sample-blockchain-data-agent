@@ -75,8 +75,9 @@ def initialize_blockchain_agent():
         ))
         
         # Create an instance of BedrockModel to define foundation model and parameters
+        # Using Global CRIS for higher throughput and ~10% cost savings
         bedrock_model = BedrockModel(
-            model_id="us.anthropic.claude-sonnet-4-20250514-v1:0",
+            model_id="global.anthropic.claude-sonnet-4-20250514-v1:0",  # Global CRIS
             temperature=0.0,
             top_p=1.0,
             cache_prompt="default" #cache system prompt with 5min TTL, reduces token usage for repeat prompts
