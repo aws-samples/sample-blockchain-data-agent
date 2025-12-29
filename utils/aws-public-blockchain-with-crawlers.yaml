@@ -20,10 +20,21 @@ Parameters:
     Default: "v1.1"
     Description: Schema version for TON blockchain
   
-  CrawlerSchedule:
+  DiscoverySchedule:
     Type: String
     Default: "cron(0 2 ? * SUN *)"
-    Description: Schedule for running crawlers (default weekly on Sunday at 2 AM UTC)
+    Description: Schedule for blockchain discovery (default weekly on Sunday at 2 AM UTC)
+  
+  DefaultCrawlerSchedule:
+    Type: String
+    Default: "daily"
+    AllowedValues:
+      - "1min"
+      - "10min"
+      - "hourly"
+      - "daily"
+      - "disabled"
+    Description: Default schedule for per-blockchain crawlers (can be changed per-chain via Lambda)
   
   EnableAutoCrawling:
     Type: String
@@ -45,7 +56,8 @@ Metadata:
       - Label:
           default: "Crawler Configuration"
         Parameters:
-          - CrawlerSchedule
+          - DiscoverySchedule
+          - DefaultCrawlerSchedule
           - EnableAutoCrawling
 
 Resources:
@@ -175,7 +187,8 @@ Resources:
           CRAWLER_ROLE_ARN: !GetAtt GlueCrawlerRole.Arn
           STACK_NAME: !Ref AWS::StackName
           SNS_TOPIC_ARN: !Ref CrawlerNotificationTopic
-          KNOWN_BLOCKCHAINS: "btc,eth,ton"
+          DEFAULT_CRAWLER_SCHEDULE: !Ref DefaultCrawlerSchedule
+          EVENTBRIDGE_ROLE_ARN: !GetAtt EventBridgeGlueRole.Arn
       Code:
         ZipFile: |
           import boto3
@@ -185,22 +198,33 @@ Resources:
           glue = boto3.client('glue')
           s3 = boto3.client('s3')
           sns = boto3.client('sns')
+          events = boto3.client('events')
+          
+          SCHEDULE_MAP = {
+              '1min': 'rate(1 minute)',
+              '10min': 'rate(10 minutes)',
+              'hourly': 'rate(1 hour)',
+              'daily': 'rate(1 day)',
+              'disabled': None
+          }
           
           def handler(event, context):
               print(f"Event: {json.dumps(event)}")
               
               bucket = os.environ['S3_BUCKET']
               schema_version = os.environ['SCHEMA_VERSION']
+              schema_version_ton = os.environ.get('SCHEMA_VERSION_TON', 'v1.1')
               crawler_role = os.environ['CRAWLER_ROLE_ARN']
               stack_name = os.environ['STACK_NAME']
               sns_topic = os.environ['SNS_TOPIC_ARN']
-              known_blockchains = set(os.environ['KNOWN_BLOCKCHAINS'].split(','))
+              default_schedule = os.environ.get('DEFAULT_CRAWLER_SCHEDULE', 'daily')
+              eventbridge_role = os.environ['EVENTBRIDGE_ROLE_ARN']
               
               # Discover blockchain namespaces in S3
               discovered = set()
               paginator = s3.get_paginator('list_objects_v2')
               
-              for version in [schema_version, os.environ.get('SCHEMA_VERSION_TON', 'v1.1')]:
+              for version in [schema_version, schema_version_ton]:
                   try:
                       pages = paginator.paginate(
                           Bucket=bucket,
@@ -218,18 +242,16 @@ Resources:
                       print(f"Error scanning {version}: {e}")
               
               print(f"Discovered blockchains: {discovered}")
-              print(f"Known blockchains: {known_blockchains}")
-              
-              # Find new blockchains
-              new_blockchains = discovered - known_blockchains
-              print(f"New blockchains to process: {new_blockchains}")
               
               created_databases = []
               created_crawlers = []
+              created_schedules = []
+              started_crawlers = []
               
-              for blockchain in new_blockchains:
+              for blockchain in discovered:
                   db_name = blockchain.lower()
                   crawler_name = f"{stack_name}-{blockchain.upper()}-Crawler"
+                  schedule_name = f"{stack_name}-{blockchain.upper()}-Schedule"
                   
                   # Create database if it doesn't exist
                   try:
@@ -247,7 +269,7 @@ Resources:
                   
                   # Determine S3 path (check both schema versions)
                   s3_path = None
-                  for version in [schema_version, os.environ.get('SCHEMA_VERSION_TON', 'v1.1')]:
+                  for version in [schema_version, schema_version_ton]:
                       test_prefix = f"{version}/{blockchain}/"
                       try:
                           response = s3.list_objects_v2(
@@ -267,6 +289,7 @@ Resources:
                       continue
                   
                   # Create crawler if it doesn't exist
+                  crawler_created = False
                   try:
                       glue.get_crawler(Name=crawler_name)
                       print(f"Crawler {crawler_name} already exists")
@@ -296,16 +319,53 @@ Resources:
                           })
                       )
                       created_crawlers.append(crawler_name)
-                      
-                      # Start the crawler immediately
-                      print(f"Starting crawler: {crawler_name}")
-                      glue.start_crawler(Name=crawler_name)
+                      crawler_created = True
+                  
+                  # Create EventBridge schedule for crawler if it doesn't exist
+                  schedule_expr = SCHEDULE_MAP.get(default_schedule)
+                  if schedule_expr and crawler_created:
+                      try:
+                          events.describe_rule(Name=schedule_name)
+                          print(f"Schedule {schedule_name} already exists")
+                      except events.exceptions.ResourceNotFoundException:
+                          print(f"Creating schedule: {schedule_name} with {default_schedule}")
+                          events.put_rule(
+                              Name=schedule_name,
+                              ScheduleExpression=schedule_expr,
+                              State='ENABLED',
+                              Description=f'Schedule for {blockchain.upper()} crawler ({default_schedule})'
+                          )
+                          events.put_targets(
+                              Rule=schedule_name,
+                              Targets=[{
+                                  'Id': f'{blockchain.upper()}CrawlerTarget',
+                                  'Arn': f'arn:aws:glue:{os.environ["AWS_REGION"]}:{context.invoked_function_arn.split(":")[4]}:crawler/{crawler_name}',
+                                  'RoleArn': eventbridge_role
+                              }]
+                          )
+                          created_schedules.append(f"{schedule_name} ({default_schedule})")
+                  
+                  # Start the crawler on first creation
+                  if crawler_created:
+                      try:
+                          crawler_state = glue.get_crawler(Name=crawler_name)['Crawler']['State']
+                          if crawler_state == 'READY':
+                              print(f"Starting crawler: {crawler_name}")
+                              glue.start_crawler(Name=crawler_name)
+                              started_crawlers.append(crawler_name)
+                          else:
+                              print(f"Crawler {crawler_name} is {crawler_state}, skipping start")
+                      except Exception as e:
+                          print(f"Error starting crawler {crawler_name}: {e}")
               
-              # Send notification if new blockchains were discovered
-              if created_databases or created_crawlers:
+              # Send notification
+              if created_databases or created_crawlers or created_schedules:
                   message = f"""
-          New Blockchain Discovery Report
-          ================================
+          Blockchain Discovery Report
+          ============================
+          
+          Blockchains Found: {len(discovered)}
+          {chr(10).join(f'  - {b}' for b in sorted(discovered))}
           
           New Databases Created: {len(created_databases)}
           {chr(10).join(f'  - {db}' for db in created_databases) if created_databases else '  None'}
@@ -313,13 +373,20 @@ Resources:
           New Crawlers Created: {len(created_crawlers)}
           {chr(10).join(f'  - {c}' for c in created_crawlers) if created_crawlers else '  None'}
           
-          Crawlers have been started automatically.
+          New Schedules Created: {len(created_schedules)}
+          {chr(10).join(f'  - {s}' for s in created_schedules) if created_schedules else '  None'}
+          
+          Crawlers Started: {len(started_crawlers)}
+          {chr(10).join(f'  - {c}' for c in started_crawlers) if started_crawlers else '  None'}
+          
           Tables will be available in Athena once crawlers complete.
+          
+          To change a crawler's schedule, use the CrawlerScheduleManager Lambda.
           """
                   
                   sns.publish(
                       TopicArn=sns_topic,
-                      Subject=f"New Blockchains Discovered: {', '.join(new_blockchains)}",
+                      Subject=f"Blockchain Discovery: {len(discovered)} chains found",
                       Message=message
                   )
               
@@ -327,9 +394,10 @@ Resources:
                   'statusCode': 200,
                   'body': json.dumps({
                       'discovered': list(discovered),
-                      'new_blockchains': list(new_blockchains),
                       'created_databases': created_databases,
-                      'created_crawlers': created_crawlers
+                      'created_crawlers': created_crawlers,
+                      'created_schedules': created_schedules,
+                      'started_crawlers': started_crawlers
                   })
               }
 
@@ -373,165 +441,24 @@ Resources:
                 Action:
                   - sns:Publish
                 Resource: !Ref CrawlerNotificationTopic
+              - Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:PutTargets
+                  - events:DescribeRule
+                  - events:DeleteRule
+                  - events:RemoveTargets
+                Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/${AWS::StackName}-*
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt EventBridgeGlueRole.Arn
 
-  # Schedule for blockchain discovery
-  BlockchainDiscoverySchedule:
-    Type: AWS::Events::Rule
-    Condition: EnableCrawling
-    Properties:
-      Name: !Sub ${AWS::StackName}-BlockchainDiscoverySchedule
-      Description: Schedule for discovering new blockchains
-      ScheduleExpression: !Ref CrawlerSchedule
-      State: ENABLED
-      Targets:
-        - Arn: !GetAtt BlockchainDiscoveryFunction.Arn
-          Id: BlockchainDiscoveryTarget
-
-  BlockchainDiscoveryPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref BlockchainDiscoveryFunction
-      Action: lambda:InvokeFunction
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt BlockchainDiscoverySchedule.Arn
-
-  # ============================================================================
-  # Per-Blockchain Crawlers (for existing chains)
-  # ============================================================================
-  
-  BTCBlockchainCrawler:
-    Type: AWS::Glue::Crawler
-    Properties:
-      Name: !Sub ${AWS::StackName}-BTC-Crawler
-      Role: !GetAtt GlueCrawlerRole.Arn
-      DatabaseName: !Ref GlueDatabaseBTC
-      Description: Crawler for Bitcoin blockchain data
-      Targets:
-        S3Targets:
-          - Path: !Sub s3://${S3Bucket}/${SchemaVersion}/btc/
-      SchemaChangePolicy:
-        UpdateBehavior: UPDATE_IN_DATABASE
-        DeleteBehavior: LOG
-      RecrawlPolicy:
-        RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
-      Configuration: |
-        {
-          "Version": 1.0,
-          "CrawlerOutput": {
-            "Partitions": {"AddOrUpdateBehavior": "InheritFromTable"}
-          }
-        }
-
-  ETHBlockchainCrawler:
-    Type: AWS::Glue::Crawler
-    Properties:
-      Name: !Sub ${AWS::StackName}-ETH-Crawler
-      Role: !GetAtt GlueCrawlerRole.Arn
-      DatabaseName: !Ref GlueDatabaseETH
-      Description: Crawler for Ethereum blockchain data
-      Targets:
-        S3Targets:
-          - Path: !Sub s3://${S3Bucket}/${SchemaVersion}/eth/
-      SchemaChangePolicy:
-        UpdateBehavior: UPDATE_IN_DATABASE
-        DeleteBehavior: LOG
-      RecrawlPolicy:
-        RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
-
-  TONBlockchainCrawler:
-    Type: AWS::Glue::Crawler
-    Properties:
-      Name: !Sub ${AWS::StackName}-TON-Crawler
-      Role: !GetAtt GlueCrawlerRole.Arn
-      DatabaseName: !Ref GlueDatabaseTON
-      Description: Crawler for TON blockchain data
-      Targets:
-        S3Targets:
-          - Path: !Sub s3://${S3Bucket}/${SchemaVersionTON}/ton/
-      SchemaChangePolicy:
-        UpdateBehavior: UPDATE_IN_DATABASE
-        DeleteBehavior: LOG
-      RecrawlPolicy:
-        RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
-
-  # ============================================================================
-  # Glue Databases (Existing Blockchains)
-  # ============================================================================
-  
-  GlueDatabaseBTC:
-    Type: AWS::Glue::Database
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseInput:
-        Name: btc
-        Description: Bitcoin blockchain data
-
-  GlueDatabaseETH:
-    Type: AWS::Glue::Database
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseInput:
-        Name: eth
-        Description: Ethereum blockchain data
-
-  GlueDatabaseTON:
-    Type: AWS::Glue::Database
-    Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseInput:
-        Name: ton
-        Description: TON blockchain data
-
-  # ============================================================================
-  # EventBridge Rules for Scheduled Crawling
-  # ============================================================================
-
-  BTCCrawlerSchedule:
-    Type: AWS::Events::Rule
-    Condition: EnableCrawling
-    Properties:
-      Name: !Sub ${AWS::StackName}-BTCCrawlerSchedule
-      Description: Schedule for BTC crawler
-      ScheduleExpression: !Ref CrawlerSchedule
-      State: ENABLED
-      Targets:
-        - Arn: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/${BTCBlockchainCrawler}
-          Id: BTCCrawlerTarget
-          RoleArn: !GetAtt EventBridgeGlueRole.Arn
-
-  ETHCrawlerSchedule:
-    Type: AWS::Events::Rule
-    Condition: EnableCrawling
-    Properties:
-      Name: !Sub ${AWS::StackName}-ETHCrawlerSchedule
-      Description: Schedule for ETH crawler
-      ScheduleExpression: !Ref CrawlerSchedule
-      State: ENABLED
-      Targets:
-        - Arn: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/${ETHBlockchainCrawler}
-          Id: ETHCrawlerTarget
-          RoleArn: !GetAtt EventBridgeGlueRole.Arn
-
-  TONCrawlerSchedule:
-    Type: AWS::Events::Rule
-    Condition: EnableCrawling
-    Properties:
-      Name: !Sub ${AWS::StackName}-TONCrawlerSchedule
-      Description: Schedule for TON crawler
-      ScheduleExpression: !Ref CrawlerSchedule
-      State: ENABLED
-      Targets:
-        - Arn: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/${TONBlockchainCrawler}
-          Id: TONCrawlerTarget
-          RoleArn: !GetAtt EventBridgeGlueRole.Arn
-
-  # ============================================================================
-  # IAM Role for EventBridge to Start Crawlers
-  # ============================================================================
-  
+  # IAM Role for EventBridge to start Glue crawlers
   EventBridgeGlueRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub ${AWS::StackName}-EventBridgeGlueRole
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -547,8 +474,207 @@ Resources:
               - Effect: Allow
                 Action:
                   - glue:StartCrawler
-                Resource:
-                  - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/*
+                Resource: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/${AWS::StackName}-*
+
+  # Schedule for blockchain discovery
+  BlockchainDiscoverySchedule:
+    Type: AWS::Events::Rule
+    Condition: EnableCrawling
+    Properties:
+      Name: !Sub ${AWS::StackName}-BlockchainDiscoverySchedule
+      Description: Schedule for discovering new blockchains
+      ScheduleExpression: !Ref DiscoverySchedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt BlockchainDiscoveryFunction.Arn
+          Id: BlockchainDiscoveryTarget
+
+  BlockchainDiscoveryPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BlockchainDiscoveryFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BlockchainDiscoverySchedule.Arn
+
+  # ============================================================================
+  # Lambda for Managing Crawler Schedules
+  # ============================================================================
+  
+  CrawlerScheduleManagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ScheduleManagerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:PutTargets
+                  - events:DescribeRule
+                  - events:DeleteRule
+                  - events:RemoveTargets
+                  - events:ListRules
+                  - events:ListTargetsByRule
+                Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/${AWS::StackName}-*
+              - Effect: Allow
+                Action:
+                  - glue:GetCrawler
+                  - glue:ListCrawlers
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt EventBridgeGlueRole.Arn
+
+  CrawlerScheduleManager:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-CrawlerScheduleManager
+      Description: Manages crawler schedules (set, get, list, disable)
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt CrawlerScheduleManagerRole.Arn
+      Timeout: 60
+      Environment:
+        Variables:
+          STACK_NAME: !Ref AWS::StackName
+          EVENTBRIDGE_ROLE_ARN: !GetAtt EventBridgeGlueRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          
+          events = boto3.client('events')
+          glue = boto3.client('glue')
+          
+          SCHEDULE_MAP = {
+              '1min': 'rate(1 minute)',
+              '10min': 'rate(10 minutes)',
+              'hourly': 'rate(1 hour)',
+              'daily': 'rate(1 day)'
+          }
+          
+          def handler(event, context):
+              """
+              Manage crawler schedules.
+              
+              Actions:
+                - list: List all crawler schedules
+                - get: Get schedule for a specific blockchain
+                - set: Set schedule for a blockchain (1min, 10min, hourly, daily)
+                - disable: Disable schedule for a blockchain
+              
+              Example payloads:
+                {"action": "list"}
+                {"action": "get", "blockchain": "btc"}
+                {"action": "set", "blockchain": "btc", "schedule": "hourly"}
+                {"action": "disable", "blockchain": "btc"}
+              """
+              print(f"Event: {json.dumps(event)}")
+              
+              stack_name = os.environ['STACK_NAME']
+              eventbridge_role = os.environ['EVENTBRIDGE_ROLE_ARN']
+              region = os.environ['AWS_REGION']
+              account_id = context.invoked_function_arn.split(':')[4]
+              
+              action = event.get('action', 'list')
+              blockchain = event.get('blockchain', '').upper()
+              schedule = event.get('schedule', '')
+              
+              if action == 'list':
+                  # List all schedules
+                  rules = events.list_rules(NamePrefix=f"{stack_name}-")['Rules']
+                  schedules = []
+                  for rule in rules:
+                      if rule['Name'].endswith('-Schedule'):
+                          chain = rule['Name'].replace(f"{stack_name}-", "").replace("-Schedule", "")
+                          schedules.append({
+                              'blockchain': chain,
+                              'schedule': rule.get('ScheduleExpression', 'unknown'),
+                              'state': rule.get('State', 'unknown')
+                          })
+                  return {'statusCode': 200, 'schedules': schedules}
+              
+              elif action == 'get':
+                  if not blockchain:
+                      return {'statusCode': 400, 'error': 'blockchain is required'}
+                  rule_name = f"{stack_name}-{blockchain}-Schedule"
+                  try:
+                      rule = events.describe_rule(Name=rule_name)
+                      return {
+                          'statusCode': 200,
+                          'blockchain': blockchain,
+                          'schedule': rule.get('ScheduleExpression'),
+                          'state': rule.get('State')
+                      }
+                  except events.exceptions.ResourceNotFoundException:
+                      return {'statusCode': 404, 'error': f'No schedule found for {blockchain}'}
+              
+              elif action == 'set':
+                  if not blockchain:
+                      return {'statusCode': 400, 'error': 'blockchain is required'}
+                  if schedule not in SCHEDULE_MAP:
+                      return {'statusCode': 400, 'error': f'Invalid schedule. Use: {list(SCHEDULE_MAP.keys())}'}
+                  
+                  rule_name = f"{stack_name}-{blockchain}-Schedule"
+                  crawler_name = f"{stack_name}-{blockchain}-Crawler"
+                  
+                  # Verify crawler exists
+                  try:
+                      glue.get_crawler(Name=crawler_name)
+                  except glue.exceptions.EntityNotFoundException:
+                      return {'statusCode': 404, 'error': f'Crawler {crawler_name} not found'}
+                  
+                  # Create or update rule
+                  events.put_rule(
+                      Name=rule_name,
+                      ScheduleExpression=SCHEDULE_MAP[schedule],
+                      State='ENABLED',
+                      Description=f'Schedule for {blockchain} crawler ({schedule})'
+                  )
+                  events.put_targets(
+                      Rule=rule_name,
+                      Targets=[{
+                          'Id': f'{blockchain}CrawlerTarget',
+                          'Arn': f'arn:aws:glue:{region}:{account_id}:crawler/{crawler_name}',
+                          'RoleArn': eventbridge_role
+                      }]
+                  )
+                  return {
+                      'statusCode': 200,
+                      'message': f'Schedule set for {blockchain}: {schedule}',
+                      'schedule_expression': SCHEDULE_MAP[schedule]
+                  }
+              
+              elif action == 'disable':
+                  if not blockchain:
+                      return {'statusCode': 400, 'error': 'blockchain is required'}
+                  rule_name = f"{stack_name}-{blockchain}-Schedule"
+                  try:
+                      # Remove targets first, then delete rule
+                      targets = events.list_targets_by_rule(Rule=rule_name)['Targets']
+                      if targets:
+                          events.remove_targets(Rule=rule_name, Ids=[t['Id'] for t in targets])
+                      events.delete_rule(Name=rule_name)
+                      return {'statusCode': 200, 'message': f'Schedule disabled for {blockchain}'}
+                  except events.exceptions.ResourceNotFoundException:
+                      return {'statusCode': 404, 'error': f'No schedule found for {blockchain}'}
+              
+              else:
+                  return {'statusCode': 400, 'error': f'Unknown action: {action}. Use: list, get, set, disable'}
 
   # ============================================================================
   # Lambda for Post-Crawler Processing
@@ -758,6 +884,12 @@ Outputs:
     Export:
       Name: !Sub ${AWS::StackName}-DiscoveryFunction
 
+  CrawlerScheduleManager:
+    Description: Lambda function for managing crawler schedules (invoke with action list/get/set/disable)
+    Value: !Ref CrawlerScheduleManager
+    Export:
+      Name: !Sub ${AWS::StackName}-ScheduleManager
+
   CrawlerNotificationTopicArn:
     Description: SNS topic for crawler notifications
     Value: !Ref CrawlerNotificationTopic
@@ -769,15 +901,3 @@ Outputs:
     Value: !GetAtt GlueCrawlerRole.Arn
     Export:
       Name: !Sub ${AWS::StackName}-CrawlerRole
-
-  BTCDatabase:
-    Description: Glue database for Bitcoin data
-    Value: !Ref GlueDatabaseBTC
-
-  ETHDatabase:
-    Description: Glue database for Ethereum data
-    Value: !Ref GlueDatabaseETH
-
-  TONDatabase:
-    Description: Glue database for TON data
-    Value: !Ref GlueDatabaseTON

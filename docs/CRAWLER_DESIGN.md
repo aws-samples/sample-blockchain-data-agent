@@ -3,7 +3,7 @@
 
 ### Overview
 
-This document describes the architecture of the automated blockchain schema discovery solution. The system automatically discovers new blockchain namespaces in the AWS Public Blockchain S3 bucket, creates dedicated databases per blockchain, infers schemas from Parquet metadata, and creates queryable Glue tables.
+This document describes the architecture of the automated blockchain schema discovery solution. The system automatically discovers new blockchain namespaces in the AWS Public Blockchain S3 bucket, creates dedicated databases per blockchain, infers schemas from Parquet metadata, creates crawlers, and sets up configurable schedules.
 
 ---
 
@@ -11,15 +11,13 @@ This document describes the architecture of the automated blockchain schema disc
 
 1. **Zero-Touch Discovery**: Automatically detect and catalog new blockchains
 2. **Database Per Blockchain**: Each blockchain gets its own dedicated Glue database
-3. **Schema Inference**: Read schemas directly from Parquet metadata
-4. **Cost Optimization**: Minimize AWS costs while maintaining functionality
+3. **Configurable Schedules**: Per-chain crawler schedules (1min, 10min, hourly, daily)
+4. **Cost Optimization**: Default to daily crawls, allow fine-tuning per chain
 5. **Extensibility**: Support any blockchain structure without code changes
 
 ---
 
 ## Architecture
-
-### High-Level Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -30,25 +28,36 @@ This document describes the architecture of the automated blockchain schema disc
 ┌─────────────────────────────────────────────────────────────┐
 │              BlockchainDiscoveryFunction (Lambda)            │
 │  1. Scans S3 for blockchain namespaces                      │
-│  2. Compares against known blockchains                      │
-│  3. Creates database for new blockchains                    │
-│  4. Creates and starts crawler for each new blockchain      │
+│  2. Creates Glue database per blockchain                    │
+│  3. Creates Glue crawler per blockchain                     │
+│  4. Creates EventBridge schedule per crawler                │
+│  5. Starts crawlers on first creation                       │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│              CrawlerScheduleManager (Lambda)                 │
+│  - List all schedules                                       │
+│  - Get/Set schedule per blockchain                          │
+│  - Disable schedules                                        │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│              EventBridge Schedules (per chain)               │
+│  {stack}-BTC-Schedule: rate(1 day)                         │
+│  {stack}-ETH-Schedule: rate(1 hour)                        │
+│  {stack}-TON-Schedule: rate(10 minutes)                    │
 └─────────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                    AWS Glue Crawlers                         │
-│  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────────────┐           │
-│  │ BTC  │  │ ETH  │  │ TON  │  │ Auto-created │           │
-│  └──────┘  └──────┘  └──────┘  └──────────────┘           │
+│  {stack}-BTC-Crawler → btc database                        │
+│  {stack}-ETH-Crawler → eth database                        │
+│  {stack}-TON-Crawler → ton database                        │
 └─────────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                  AWS Glue Data Catalog                       │
-│       btc  |  eth  |  ton  |  newchain (auto-created)       │
-└─────────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│         EventBridge → Lambda → SNS Notifications             │
+│       btc  |  eth  |  ton  |  (auto-created)               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -56,212 +65,177 @@ This document describes the architecture of the automated blockchain schema disc
 
 ## Component Details
 
-### 1. BlockchainDiscoveryFunction (Lambda)
+### 1. BlockchainDiscoveryFunction
 
-**Purpose**: Discovers new blockchains and creates dedicated databases + crawlers
+**Purpose**: Discovers blockchains and creates all necessary resources
 
-**Trigger**: EventBridge schedule (weekly) or manual invocation
+**Trigger**: 
+- EventBridge schedule (weekly by default)
+- Manual invocation
 
 **Process**:
+1. Scan S3 bucket for blockchain namespaces (v1.0/*, v1.1/*)
+2. For each discovered blockchain:
+   - Create Glue database if not exists
+   - Create Glue crawler if not exists
+   - Create EventBridge schedule if crawler is new
+   - Start crawler on first creation
+3. Send SNS notification with discovery report
+
+**Environment Variables**:
+- `S3_BUCKET`: Source bucket
+- `SCHEMA_VERSION`: Default schema version
+- `SCHEMA_VERSION_TON`: TON schema version
+- `CRAWLER_ROLE_ARN`: IAM role for crawlers
+- `STACK_NAME`: CloudFormation stack name
+- `SNS_TOPIC_ARN`: Notification topic
+- `DEFAULT_CRAWLER_SCHEDULE`: Default schedule (1min/10min/hourly/daily)
+- `EVENTBRIDGE_ROLE_ARN`: Role for EventBridge to start crawlers
+
+### 2. CrawlerScheduleManager
+
+**Purpose**: Manage per-chain crawler schedules
+
+**Actions**:
+- `list`: List all crawler schedules
+- `get`: Get schedule for specific blockchain
+- `set`: Set schedule (1min, 10min, hourly, daily)
+- `disable`: Remove schedule (manual-only mode)
+
+**Schedule Mapping**:
 ```python
-1. Scan S3 bucket for blockchain namespaces
-   - List prefixes under v1.0/, v1.1/, etc.
-   - Extract blockchain names (btc, eth, ton, etc.)
-
-2. Compare against known blockchains
-   - Known: btc, eth, ton (defined in CloudFormation)
-   - New: Any blockchain not in known list
-
-3. For each new blockchain:
-   a. Create Glue database (e.g., "sol" for Solana)
-   b. Determine S3 path (check schema versions)
-   c. Create Glue crawler targeting that path
-   d. Start the crawler immediately
-
-4. Send SNS notification with discovery report
+SCHEDULE_MAP = {
+    '1min': 'rate(1 minute)',
+    '10min': 'rate(10 minutes)',
+    'hourly': 'rate(1 hour)',
+    'daily': 'rate(1 day)'
+}
 ```
 
-**Why Lambda Instead of Master Crawler**:
-- Glue Crawlers cannot dynamically create databases
-- Lambda can create both databases AND crawlers
-- More control over naming and configuration
-- Can start crawlers immediately after creation
+### 3. EventBridge Schedules
 
-### 2. Per-Blockchain Crawlers
+**Naming**: `{stack-name}-{BLOCKCHAIN}-Schedule`
 
-**Purpose**: Maintain schemas for each blockchain in its dedicated database
+**Target**: Glue crawler ARN with EventBridgeGlueRole
+
+**States**: ENABLED or deleted (for disabled)
+
+### 4. Glue Crawlers
+
+**Naming**: `{stack-name}-{BLOCKCHAIN}-Crawler`
 
 **Configuration**:
-- **Target**: `s3://aws-public-blockchain/{version}/{blockchain}/`
-- **Database**: `{blockchain}` (e.g., `btc`, `eth`, `ton`)
-- **Schedule**: Weekly (via EventBridge)
-- **Recrawl Policy**: `CRAWL_NEW_FOLDERS_ONLY`
-- **Schema Policy**: `UPDATE_IN_DATABASE`, `MergeNewColumns`
+- `RecrawlBehavior`: CRAWL_NEW_FOLDERS_ONLY (cost optimization)
+- `UpdateBehavior`: UPDATE_IN_DATABASE
+- `DeleteBehavior`: LOG
 
-**Pre-defined Crawlers** (in CloudFormation):
-- BTC Crawler → `btc` database
-- ETH Crawler → `eth` database
-- TON Crawler → `ton` database
+### 5. EventBridgeGlueRole
 
-**Auto-created Crawlers** (by Lambda):
-- Created dynamically when new blockchains are discovered
-- Same configuration as pre-defined crawlers
+**Purpose**: Allow EventBridge to start Glue crawlers
 
-### 3. EventBridge Scheduling
+**Permissions**: `glue:StartCrawler` on stack crawlers
 
-**Discovery Schedule**:
-- Triggers `BlockchainDiscoveryFunction` weekly
-- Can be invoked manually anytime
+---
 
-**Crawler Schedules**:
-- Each pre-defined crawler has its own EventBridge rule
-- Auto-created crawlers can be triggered manually or via Lambda
+## Data Flow
 
-### 4. Notification System
+### New Blockchain Discovery
 
-**CrawlerCompletionHandler Lambda**:
-- Triggered by EventBridge on crawler state changes
-- Sends SNS notifications on completion
-- Reports discovered tables and schemas
+```
+1. New blockchain added to S3: s3://aws-public-blockchain/v1.0/sol/
 
-**BlockchainDiscoveryFunction**:
-- Sends SNS notification when new blockchains are discovered
-- Reports created databases and crawlers
+2. Discovery Lambda runs (weekly or manual)
+   - Scans S3, finds "sol" namespace
+   
+3. Creates resources:
+   - Database: sol
+   - Crawler: {stack}-SOL-Crawler
+   - Schedule: {stack}-SOL-Schedule (daily by default)
+   
+4. Starts crawler immediately
+
+5. Crawler infers schema from Parquet metadata
+   - Creates tables: sol.blocks, sol.transactions, etc.
+   
+6. SNS notification sent
+
+7. Data queryable in Athena:
+   SELECT * FROM sol.blocks LIMIT 10;
+```
+
+### Schedule Change
+
+```
+1. User invokes CrawlerScheduleManager:
+   {"action": "set", "blockchain": "SOL", "schedule": "hourly"}
+
+2. Lambda updates EventBridge rule:
+   - Rule: {stack}-SOL-Schedule
+   - Expression: rate(1 hour)
+   
+3. Crawler now runs hourly
+```
 
 ---
 
 ## Design Decisions
 
-### 1. Database Per Blockchain
+### 1. Per-Chain Schedules
 
-**Decision**: Each blockchain gets its own Glue database
-
-**Rationale**:
-- Clear organizational structure
-- Easier permission management per blockchain
-- Cleaner Athena queries (`SELECT * FROM btc.blocks`)
-- Aligns with data domain boundaries
-
-**Alternative Rejected**: Single `blockchain_discovery` database
-- Cons: All tables mixed together, harder to manage
-
-### 2. Lambda for Discovery
-
-**Decision**: Use Lambda to discover blockchains and create resources
+**Decision**: Each blockchain has its own configurable schedule
 
 **Rationale**:
-- Glue Crawlers can only create tables, not databases
-- Lambda provides full control over resource creation
-- Can implement custom logic (naming, configuration)
-- Immediate crawler execution after creation
+- Different chains have different update frequencies
+- Cost optimization (don't over-crawl inactive chains)
+- Flexibility for real-time vs batch use cases
 
-**Alternative Rejected**: Master Crawler approach
-- Cons: Cannot create databases, all tables in one database
+### 2. EventBridge for Scheduling
 
-### 3. Pre-defined + Auto-created Crawlers
-
-**Decision**: Pre-define crawlers for known blockchains, auto-create for new ones
+**Decision**: Use EventBridge rules instead of Glue native scheduling
 
 **Rationale**:
-- Known blockchains (BTC, ETH, TON) have stable configurations
-- CloudFormation provides version control for known resources
-- Lambda handles unknown future blockchains
-- Best of both worlds: control + automation
+- Dynamic creation/modification via API
+- Consistent naming convention
+- Easy to list/manage all schedules
+- Can be disabled without deleting crawler
 
-### 4. Weekly Schedule
+### 3. Default Daily Schedule
 
-**Decision**: Weekly discovery and crawling (Sunday 2 AM UTC)
+**Decision**: New crawlers default to daily
 
 **Rationale**:
-- Blockchain data is immutable (historical data doesn't change)
-- New blockchains added infrequently
-- 75% cost savings vs daily
-- Manual trigger available for urgent needs
+- Cost-effective baseline
+- Blockchain data is append-only (historical doesn't change)
+- Users can upgrade specific chains as needed
 
----
+### 4. Discovery Creates Schedules
 
-## Data Flow: New Blockchain Discovery
+**Decision**: Discovery Lambda creates schedules for new crawlers only
 
-```
-1. New Blockchain Added to S3
-   s3://aws-public-blockchain/v1.0/sol/blocks/
-   s3://aws-public-blockchain/v1.0/sol/transactions/
-
-2. Discovery Lambda Runs (Weekly or Manual)
-   - Scans S3: finds "sol" namespace
-   - Compares: "sol" not in known list
-   - Action: Process new blockchain
-
-3. Database Creation
-   glue.create_database(Name="sol", Description="Solana blockchain data")
-
-4. Crawler Creation
-   glue.create_crawler(
-       Name="blockchain-crawlers-SOL-Crawler",
-       DatabaseName="sol",
-       Targets={"S3Targets": [{"Path": "s3://aws-public-blockchain/v1.0/sol/"}]}
-   )
-
-5. Crawler Execution
-   glue.start_crawler(Name="blockchain-crawlers-SOL-Crawler")
-
-6. Schema Inference
-   - Crawler reads Parquet metadata
-   - Creates tables: sol.blocks, sol.transactions
-   - Detects partitions from S3 path
-
-7. Notification
-   SNS: "New Blockchain Discovered: sol"
-   - Database created: sol
-   - Crawler created: blockchain-crawlers-SOL-Crawler
-   - Tables will be available after crawler completes
-
-8. Data Available
-   SELECT * FROM sol.blocks WHERE date = '2024-01-01';
-```
-
----
-
-## Schema Inference
-
-### How Crawlers Infer Schemas
-
-1. **Parquet Metadata**: Schemas embedded in file metadata
-2. **Type Mapping**: Arrow types → Glue types
-3. **Partition Detection**: Hive-style paths (key=value)
-4. **Complex Types**: Nested structures preserved
-
-### Type Mapping
-
-| Parquet/Arrow | Glue Type |
-|---------------|-----------|
-| int32 | int |
-| int64 | bigint |
-| string | string |
-| bool | boolean |
-| timestamp | timestamp |
-| list | array<type> |
-| struct | struct<fields> |
+**Rationale**:
+- Existing schedules are preserved (user customizations)
+- New chains get sensible defaults
+- Idempotent operation
 
 ---
 
 ## Cost Analysis
 
-### Monthly Costs (~$2-5/month)
+### Per-Chain Monthly Costs
 
-| Component | Cost |
-|-----------|------|
-| Lambda (Discovery + Completion) | ~$0.00 (free tier) |
-| Glue Crawlers (4 × weekly) | ~$1.50 |
-| Glue Data Catalog | ~$1.00 |
-| SNS Notifications | ~$0.00 |
-| EventBridge | ~$0.00 |
+| Schedule | Runs/Month | Est. Glue Cost |
+|----------|------------|----------------|
+| 1min | 43,200 | $50-100+ |
+| 10min | 4,320 | $5-10 |
+| hourly | 720 | $1-2 |
+| daily | 30 | $0.50 |
 
-### Cost Optimization
+### Recommendations
 
-1. **CRAWL_NEW_FOLDERS_ONLY**: 90% reduction in data scanned
-2. **Weekly schedule**: 75% savings vs daily
-3. **Lambda free tier**: Covers all invocations
+- **Production**: Use `daily` for most chains
+- **Active development**: Use `hourly` for chains under active query
+- **Real-time dashboards**: Use `10min` or `1min` (monitor costs)
+- **Inactive chains**: Use `disable` and trigger manually
 
 ---
 
@@ -269,61 +243,51 @@ This document describes the architecture of the automated blockchain schema disc
 
 ### IAM Roles
 
-**GlueCrawlerRole**:
-- S3: GetObject, ListBucket (read-only)
-- Glue: Database/Table management
+| Role | Purpose | Key Permissions |
+|------|---------|-----------------|
+| GlueCrawlerRole | Crawler execution | S3 read, Glue catalog |
+| BlockchainDiscoveryRole | Discovery Lambda | S3 list, Glue create, Events create |
+| CrawlerScheduleManagerRole | Schedule Lambda | Events CRUD |
+| EventBridgeGlueRole | Start crawlers | glue:StartCrawler |
 
-**BlockchainDiscoveryRole**:
-- S3: ListBucket, GetObject
-- Glue: CreateDatabase, CreateCrawler, StartCrawler
-- IAM: PassRole (for crawler role)
-- SNS: Publish
+### Resource Scoping
 
-**EventBridgeGlueRole**:
-- Glue: StartCrawler only
-
-### Encryption
-
-- S3: AES256
-- Athena Results: SSE-S3
-- SNS: KMS encryption
+All EventBridge rules and crawlers are scoped to `{stack-name}-*` pattern.
 
 ---
 
 ## Extensibility
 
-### Adding Custom Processing
+### Adding Custom Schedules
 
-Extend the Lambda handlers to:
-- Send Slack notifications
-- Trigger data pipelines
-- Create Athena views
-- Update documentation
-
-### Manual Crawler Addition
-
-For blockchains needing special configuration:
-
-```yaml
-SOLBlockchainCrawler:
-  Type: AWS::Glue::Crawler
-  Properties:
-    Name: !Sub ${AWS::StackName}-SOL-Crawler
-    Role: !GetAtt GlueCrawlerRole.Arn
-    DatabaseName: !Ref GlueDatabaseSOL
-    Targets:
-      S3Targets:
-        - Path: !Sub s3://${S3Bucket}/v1.0/sol/
+Modify `SCHEDULE_MAP` in both Lambdas:
+```python
+SCHEDULE_MAP = {
+    '1min': 'rate(1 minute)',
+    '5min': 'rate(5 minutes)',  # Add new option
+    '10min': 'rate(10 minutes)',
+    'hourly': 'rate(1 hour)',
+    'daily': 'rate(1 day)',
+    'weekly': 'rate(7 days)'  # Add new option
+}
 ```
+
+### Custom Processing
+
+Extend `CrawlerCompletionHandler` to:
+- Trigger data pipelines
+- Update dashboards
+- Send Slack notifications
+- Create Athena views
 
 ---
 
 ## Limitations
 
-1. **Parquet Only**: Assumes data is in Parquet format
-2. **Weekly Latency**: Not real-time (configurable)
-3. **S3 Structure**: Assumes blockchain/table/partition structure
-4. **Naming Convention**: Database names derived from S3 paths
+1. **Minimum schedule**: 1 minute (EventBridge limit)
+2. **Parquet only**: Assumes data is in Parquet format
+3. **S3 structure**: Assumes `{version}/{blockchain}/` structure
+4. **Concurrent crawlers**: AWS Glue has soft limits on concurrent crawlers
 
 ---
 
@@ -333,12 +297,14 @@ SOLBlockchainCrawler:
 
 - Crawler: `glue.driver.aggregate.numBytes`, `elapsedTime`
 - Lambda: `Invocations`, `Errors`, `Duration`
+- EventBridge: `TriggeredRules`, `FailedInvocations`
 
 ### Logs
 
 - `/aws-glue/crawlers` - Crawler execution
-- `/aws/lambda/BlockchainDiscovery` - Discovery function
-- `/aws/lambda/CrawlerCompletionHandler` - Completion handler
+- `/aws/lambda/{stack}-BlockchainDiscovery` - Discovery
+- `/aws/lambda/{stack}-CrawlerScheduleManager` - Schedule changes
+- `/aws/lambda/{stack}-CrawlerCompletionHandler` - Completions
 
 ### Alerts
 
@@ -346,15 +312,3 @@ Subscribe to SNS topic for:
 - New blockchain discoveries
 - Crawler completions
 - Error notifications
-
----
-
-## Conclusion
-
-This architecture provides automatic discovery and cataloging of blockchain data with:
-
-1. **Separate database per blockchain** for clean organization
-2. **Lambda-based discovery** for dynamic resource creation
-3. **Pre-defined crawlers** for known blockchains
-4. **Auto-created crawlers** for new blockchains
-5. **Cost-effective** weekly scheduling with manual override
