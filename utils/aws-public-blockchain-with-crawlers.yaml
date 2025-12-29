@@ -153,56 +153,247 @@ Resources:
                   - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*/*
 
   # ============================================================================
-  # Discovery Database - For New Blockchains
+  # Dynamic Database Discovery - Creates Separate DB Per Blockchain
   # ============================================================================
   
-  GlueDatabaseDiscovery:
-    Type: AWS::Glue::Database
+  # Lambda function that discovers new blockchains and creates databases + crawlers
+  BlockchainDiscoveryFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      CatalogId: !Ref AWS::AccountId
-      DatabaseInput:
-        Name: blockchain_discovery
-        Description: >
-          Auto-discovered blockchain schemas. Tables here are created by crawlers
-          when new blockchain data is detected in the S3 bucket.
+      FunctionName: !Sub ${AWS::StackName}-BlockchainDiscovery
+      Description: Discovers new blockchains in S3 and creates dedicated databases and crawlers
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt BlockchainDiscoveryRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref S3Bucket
+          SCHEMA_VERSION: !Ref SchemaVersion
+          SCHEMA_VERSION_TON: !Ref SchemaVersionTON
+          CRAWLER_ROLE_ARN: !GetAtt GlueCrawlerRole.Arn
+          STACK_NAME: !Ref AWS::StackName
+          SNS_TOPIC_ARN: !Ref CrawlerNotificationTopic
+          KNOWN_BLOCKCHAINS: "btc,eth,ton"
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          
+          glue = boto3.client('glue')
+          s3 = boto3.client('s3')
+          sns = boto3.client('sns')
+          
+          def handler(event, context):
+              print(f"Event: {json.dumps(event)}")
+              
+              bucket = os.environ['S3_BUCKET']
+              schema_version = os.environ['SCHEMA_VERSION']
+              crawler_role = os.environ['CRAWLER_ROLE_ARN']
+              stack_name = os.environ['STACK_NAME']
+              sns_topic = os.environ['SNS_TOPIC_ARN']
+              known_blockchains = set(os.environ['KNOWN_BLOCKCHAINS'].split(','))
+              
+              # Discover blockchain namespaces in S3
+              discovered = set()
+              paginator = s3.get_paginator('list_objects_v2')
+              
+              for version in [schema_version, os.environ.get('SCHEMA_VERSION_TON', 'v1.1')]:
+                  try:
+                      pages = paginator.paginate(
+                          Bucket=bucket,
+                          Prefix=f"{version}/",
+                          Delimiter='/',
+                          RequestPayer='requester'
+                      )
+                      for page in pages:
+                          for prefix in page.get('CommonPrefixes', []):
+                              parts = prefix['Prefix'].strip('/').split('/')
+                              if len(parts) >= 2:
+                                  blockchain = parts[1].lower()
+                                  discovered.add(blockchain)
+                  except Exception as e:
+                      print(f"Error scanning {version}: {e}")
+              
+              print(f"Discovered blockchains: {discovered}")
+              print(f"Known blockchains: {known_blockchains}")
+              
+              # Find new blockchains
+              new_blockchains = discovered - known_blockchains
+              print(f"New blockchains to process: {new_blockchains}")
+              
+              created_databases = []
+              created_crawlers = []
+              
+              for blockchain in new_blockchains:
+                  db_name = blockchain.lower()
+                  crawler_name = f"{stack_name}-{blockchain.upper()}-Crawler"
+                  
+                  # Create database if it doesn't exist
+                  try:
+                      glue.get_database(Name=db_name)
+                      print(f"Database {db_name} already exists")
+                  except glue.exceptions.EntityNotFoundException:
+                      print(f"Creating database: {db_name}")
+                      glue.create_database(
+                          DatabaseInput={
+                              'Name': db_name,
+                              'Description': f'Auto-discovered {blockchain.upper()} blockchain data'
+                          }
+                      )
+                      created_databases.append(db_name)
+                  
+                  # Determine S3 path (check both schema versions)
+                  s3_path = None
+                  for version in [schema_version, os.environ.get('SCHEMA_VERSION_TON', 'v1.1')]:
+                      test_prefix = f"{version}/{blockchain}/"
+                      try:
+                          response = s3.list_objects_v2(
+                              Bucket=bucket,
+                              Prefix=test_prefix,
+                              MaxKeys=1,
+                              RequestPayer='requester'
+                          )
+                          if response.get('Contents') or response.get('CommonPrefixes'):
+                              s3_path = f"s3://{bucket}/{version}/{blockchain}/"
+                              break
+                      except Exception as e:
+                          print(f"Error checking {test_prefix}: {e}")
+                  
+                  if not s3_path:
+                      print(f"No data found for {blockchain}, skipping crawler creation")
+                      continue
+                  
+                  # Create crawler if it doesn't exist
+                  try:
+                      glue.get_crawler(Name=crawler_name)
+                      print(f"Crawler {crawler_name} already exists")
+                  except glue.exceptions.EntityNotFoundException:
+                      print(f"Creating crawler: {crawler_name} for {s3_path}")
+                      glue.create_crawler(
+                          Name=crawler_name,
+                          Role=crawler_role,
+                          DatabaseName=db_name,
+                          Description=f'Auto-created crawler for {blockchain.upper()} blockchain',
+                          Targets={
+                              'S3Targets': [{'Path': s3_path}]
+                          },
+                          SchemaChangePolicy={
+                              'UpdateBehavior': 'UPDATE_IN_DATABASE',
+                              'DeleteBehavior': 'LOG'
+                          },
+                          RecrawlPolicy={
+                              'RecrawlBehavior': 'CRAWL_NEW_FOLDERS_ONLY'
+                          },
+                          Configuration=json.dumps({
+                              "Version": 1.0,
+                              "CrawlerOutput": {
+                                  "Partitions": {"AddOrUpdateBehavior": "InheritFromTable"},
+                                  "Tables": {"AddOrUpdateBehavior": "MergeNewColumns"}
+                              }
+                          })
+                      )
+                      created_crawlers.append(crawler_name)
+                      
+                      # Start the crawler immediately
+                      print(f"Starting crawler: {crawler_name}")
+                      glue.start_crawler(Name=crawler_name)
+              
+              # Send notification if new blockchains were discovered
+              if created_databases or created_crawlers:
+                  message = f"""
+          New Blockchain Discovery Report
+          ================================
+          
+          New Databases Created: {len(created_databases)}
+          {chr(10).join(f'  - {db}' for db in created_databases) if created_databases else '  None'}
+          
+          New Crawlers Created: {len(created_crawlers)}
+          {chr(10).join(f'  - {c}' for c in created_crawlers) if created_crawlers else '  None'}
+          
+          Crawlers have been started automatically.
+          Tables will be available in Athena once crawlers complete.
+          """
+                  
+                  sns.publish(
+                      TopicArn=sns_topic,
+                      Subject=f"New Blockchains Discovered: {', '.join(new_blockchains)}",
+                      Message=message
+                  )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'discovered': list(discovered),
+                      'new_blockchains': list(new_blockchains),
+                      'created_databases': created_databases,
+                      'created_crawlers': created_crawlers
+                  })
+              }
 
-  # ============================================================================
-  # Master Crawler - Discovers New Blockchains
-  # ============================================================================
-  
-  MasterBlockchainCrawler:
-    Type: AWS::Glue::Crawler
+  BlockchainDiscoveryRole:
+    Type: AWS::IAM::Role
     Properties:
-      Name: !Sub ${AWS::StackName}-MasterBlockchainDiscovery
-      Role: !GetAtt GlueCrawlerRole.Arn
-      DatabaseName: !Ref GlueDatabaseDiscovery
-      Description: >
-        Master crawler that scans the entire S3 bucket to discover new blockchain
-        namespaces and their data structures. Creates tables automatically.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BlockchainDiscoveryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetObject
+                Resource:
+                  - !Sub arn:aws:s3:::${S3Bucket}
+                  - !Sub arn:aws:s3:::${S3Bucket}/*
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:CreateDatabase
+                  - glue:GetCrawler
+                  - glue:CreateCrawler
+                  - glue:StartCrawler
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt GlueCrawlerRole.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref CrawlerNotificationTopic
+
+  # Schedule for blockchain discovery
+  BlockchainDiscoverySchedule:
+    Type: AWS::Events::Rule
+    Condition: EnableCrawling
+    Properties:
+      Name: !Sub ${AWS::StackName}-BlockchainDiscoverySchedule
+      Description: Schedule for discovering new blockchains
+      ScheduleExpression: !Ref CrawlerSchedule
+      State: ENABLED
       Targets:
-        S3Targets:
-          - Path: !Sub s3://${S3Bucket}/
-            Exclusions:
-              # Exclude known blockchains to avoid duplication
-              - "v1.0/btc/**"
-              - "v1.0/eth/**"
-              - "v1.1/ton/**"
-      SchemaChangePolicy:
-        UpdateBehavior: UPDATE_IN_DATABASE
-        DeleteBehavior: LOG
-      RecrawlPolicy:
-        RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
-      Configuration: |
-        {
-          "Version": 1.0,
-          "CrawlerOutput": {
-            "Partitions": {"AddOrUpdateBehavior": "InheritFromTable"},
-            "Tables": {"AddOrUpdateBehavior": "MergeNewColumns"}
-          },
-          "Grouping": {
-            "TableGroupingPolicy": "CombineCompatibleSchemas"
-          }
-        }
+        - Arn: !GetAtt BlockchainDiscoveryFunction.Arn
+          Id: BlockchainDiscoveryTarget
+
+  BlockchainDiscoveryPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BlockchainDiscoveryFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BlockchainDiscoverySchedule.Arn
 
   # ============================================================================
   # Per-Blockchain Crawlers (for existing chains)
@@ -294,19 +485,6 @@ Resources:
   # ============================================================================
   # EventBridge Rules for Scheduled Crawling
   # ============================================================================
-  
-  MasterCrawlerSchedule:
-    Type: AWS::Events::Rule
-    Condition: EnableCrawling
-    Properties:
-      Name: !Sub ${AWS::StackName}-MasterCrawlerSchedule
-      Description: Schedule for master blockchain discovery crawler
-      ScheduleExpression: !Ref CrawlerSchedule
-      State: ENABLED
-      Targets:
-        - Arn: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/${MasterBlockchainCrawler}
-          Id: MasterCrawlerTarget
-          RoleArn: !GetAtt EventBridgeGlueRole.Arn
 
   BTCCrawlerSchedule:
     Type: AWS::Events::Rule
@@ -399,9 +577,6 @@ Resources:
                   - glue:GetDatabase
                   - glue:GetTable
                   - glue:GetTables
-                  - glue:UpdateTable
-                  - glue:CreatePartition
-                  - glue:BatchCreatePartition
                 Resource: '*'
         - PolicyName: SNSPublish
           PolicyDocument:
@@ -424,7 +599,6 @@ Resources:
       Environment:
         Variables:
           SNS_TOPIC_ARN: !Ref CrawlerNotificationTopic
-          DISCOVERY_DATABASE: !Ref GlueDatabaseDiscovery
       Code:
         ZipFile: |
           import json
@@ -473,11 +647,6 @@ Resources:
                   message_parts.append(f"  • {table_name}")
                   message_parts.append(f"    - Columns: {column_count}")
                   message_parts.append(f"    - Location: {location}")
-                  
-                  # Check if this is a new blockchain discovery
-                  if database_name == os.environ['DISCOVERY_DATABASE']:
-                      message_parts.append(f"    - ⚠️  NEW BLOCKCHAIN DETECTED!")
-                  
                   message_parts.append("")
               
               message = "\n".join(message_parts)
@@ -567,14 +736,6 @@ Resources:
       Type: String
       Value: !Ref SchemaVersionTON
 
-  DiscoveryDatabaseParameter:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: /blockchain/discovery-database
-      Description: Glue database for discovered blockchains
-      Type: String
-      Value: !Ref GlueDatabaseDiscovery
-
 Conditions:
   EnableCrawling: !Equals [!Ref EnableAutoCrawling, "true"]
 
@@ -591,17 +752,11 @@ Outputs:
     Export:
       Name: !Sub ${AWS::StackName}-AthenaWorkgroup
 
-  MasterCrawlerName:
-    Description: Name of the master blockchain discovery crawler
-    Value: !Ref MasterBlockchainCrawler
+  BlockchainDiscoveryFunction:
+    Description: Lambda function for discovering new blockchains
+    Value: !Ref BlockchainDiscoveryFunction
     Export:
-      Name: !Sub ${AWS::StackName}-MasterCrawler
-
-  DiscoveryDatabase:
-    Description: Glue database for auto-discovered blockchains
-    Value: !Ref GlueDatabaseDiscovery
-    Export:
-      Name: !Sub ${AWS::StackName}-DiscoveryDatabase
+      Name: !Sub ${AWS::StackName}-DiscoveryFunction
 
   CrawlerNotificationTopicArn:
     Description: SNS topic for crawler notifications
