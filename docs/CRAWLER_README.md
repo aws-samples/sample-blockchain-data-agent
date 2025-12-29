@@ -32,6 +32,8 @@ aws cloudformation create-stack \
 aws cloudformation wait stack-create-complete --stack-name blockchain-crawlers
 ```
 
+The stack automatically runs initial discovery on deployment, creating databases, crawlers, and schedules for all blockchains found in S3.
+
 ### 2. Subscribe to Notifications
 
 ```bash
@@ -46,20 +48,7 @@ aws sns subscribe \
   --notification-endpoint your-email@example.com
 ```
 
-### 3. Run Initial Discovery
-
-```bash
-aws lambda invoke \
-  --function-name blockchain-crawlers-BlockchainDiscovery \
-  --payload '{}' \
-  response.json --no-cli-pager
-
-cat response.json
-```
-
-This will discover all blockchains (btc, eth, ton, etc.), create databases, crawlers, and schedules.
-
-### 4. Query Data
+### 3. Query Data
 
 ```sql
 -- In Athena console

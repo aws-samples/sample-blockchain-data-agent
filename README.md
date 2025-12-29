@@ -20,6 +20,19 @@ This project demonstrates how to build an intelligent blockchain data analysis a
 - **AWS CLI** (if developing locally, use `aws configure` to set up credentials)
 - **Amazon Bedrock model access** (use the AWS Console to enable the required foundation models, such as Claude Sonnet 4)
 - **Docker** installed with Buildx add-on
+- **Blockchain Data Consumer Architecture** deployed to give your agent access to data from the [AWS Public Blockchain Datasets](https://registry.opendata.aws/aws-public-blockchain/) (see step 0. below)
+
+### 0. Deploy the Blockchain Data Consumer Architecture via CloudFormation
+
+```bash
+#deploys data infra to give your agent access to data from the AWS Public Blockchain Datasets
+aws cloudformation create-stack \
+  --stack-name blockchain-crawlers \
+  --template-body file://utils/aws-public-blockchain-with-crawlers.yaml \
+  --capabilities CAPABILITY_NAMED_IAM
+
+aws cloudformation wait stack-create-complete --stack-name blockchain-crawlers
+```
 
 ### 1. Install Dependencies
 

@@ -498,6 +498,103 @@ Resources:
       SourceArn: !GetAtt BlockchainDiscoverySchedule.Arn
 
   # ============================================================================
+  # Custom Resource to Trigger Initial Discovery on Deployment
+  # ============================================================================
+  
+  InitialDiscoveryTrigger:
+    Type: Custom::InitialDiscovery
+    DependsOn:
+      - BlockchainDiscoveryFunction
+      - EventBridgeGlueRole
+      - GlueCrawlerRole
+      - CrawlerNotificationTopic
+    Properties:
+      ServiceToken: !GetAtt InitialDiscoveryFunction.Arn
+      DiscoveryFunctionName: !Ref BlockchainDiscoveryFunction
+
+  InitialDiscoveryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-InitialDiscoveryTrigger
+      Description: Triggers initial blockchain discovery on stack creation
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt InitialDiscoveryRole.Arn
+      Timeout: 600
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import json
+          
+          lambda_client = boto3.client('lambda')
+          
+          def handler(event, context):
+              print(f"Event: {json.dumps(event)}")
+              
+              request_type = event['RequestType']
+              discovery_function = event['ResourceProperties']['DiscoveryFunctionName']
+              
+              try:
+                  if request_type == 'Create':
+                      # Invoke discovery function on stack creation
+                      print(f"Invoking discovery function: {discovery_function}")
+                      response = lambda_client.invoke(
+                          FunctionName=discovery_function,
+                          InvocationType='RequestResponse',
+                          Payload=json.dumps({'trigger': 'initial_deployment'})
+                      )
+                      
+                      payload = json.loads(response['Payload'].read())
+                      print(f"Discovery response: {json.dumps(payload)}")
+                      
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, 
+                                      {'Result': 'Initial discovery completed'},
+                                      physicalResourceId='InitialDiscovery')
+                  
+                  elif request_type == 'Update':
+                      # Optionally re-run discovery on stack update
+                      print("Stack update - skipping discovery (run manually if needed)")
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS,
+                                      {'Result': 'Update - no action'},
+                                      physicalResourceId='InitialDiscovery')
+                  
+                  elif request_type == 'Delete':
+                      # Nothing to clean up
+                      print("Stack delete - no cleanup needed")
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS,
+                                      {'Result': 'Delete - no action'},
+                                      physicalResourceId='InitialDiscovery')
+                      
+              except Exception as e:
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED,
+                                  {'Error': str(e)},
+                                  physicalResourceId='InitialDiscovery')
+
+  InitialDiscoveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: InvokeDiscoveryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt BlockchainDiscoveryFunction.Arn
+
+  # ============================================================================
   # Lambda for Managing Crawler Schedules
   # ============================================================================
   
@@ -835,13 +932,13 @@ Resources:
       KmsMasterKeyId: alias/aws/sns
 
   # ============================================================================
-  # SSM Parameters
+  # SSM Parameters (matching original template naming convention)
   # ============================================================================
   
   BucketNameParameter:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: /blockchain/s3-bucket
+      Name: public-blockchain-bucket
       Description: AWS Public Blockchain S3 bucket
       Type: String
       Value: !Ref S3Bucket
@@ -849,7 +946,7 @@ Resources:
   SchemaVersionParameter:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: /blockchain/schema-version
+      Name: public-blockchain-schema-version
       Description: AWS Public Blockchain Schema Version
       Type: String
       Value: !Ref SchemaVersion
@@ -857,7 +954,7 @@ Resources:
   SchemaVersionParameterTON:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: /blockchain/schema-version-ton
+      Name: public-blockchain-schema-version-ton
       Description: AWS Public Blockchain Schema Version for TON
       Type: String
       Value: !Ref SchemaVersionTON

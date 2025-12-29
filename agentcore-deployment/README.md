@@ -48,10 +48,24 @@ agentcore-deployment/
 - **AWS CLI** (if developing locally, use `aws configure` to set up credentials)
 - **AWS Bedrock model access** (use the AWS Console to enable the required foundation models, such as Claude Sonnet 4)
 - **Boto3** (used in the deployment script)
- 
+- **Blockchain Data Consumer Architecture** deployed to give your agent access to data from the [AWS Public Blockchain Datasets](https://registry.opendata.aws/aws-public-blockchain/) (see step 0. below)
+
 
 
 ## 🚀 Quick Start
+
+### 0. Deploy the Blockchain Data Consumer Architecture via CloudFormation
+Your blockchain data agent will need access to public blockchain data for analysis. This data can be sourced from a variety of places, such as APIs or your own indexed data repositories. In this example, we provide a deployable architecture that gives your agent access to indexed public blockchain data from the [AWS Public Blockchain Datasets](https://registry.opendata.aws/aws-public-blockchain/). 
+
+```bash
+aws cloudformation create-stack \
+  --stack-name blockchain-crawlers \
+  --template-body file://utils/aws-public-blockchain-with-crawlers.yaml \
+  --capabilities CAPABILITY_NAMED_IAM
+
+aws cloudformation wait stack-create-complete --stack-name blockchain-crawlers
+```
+
 
 ### 1. Install Dependencies
 
