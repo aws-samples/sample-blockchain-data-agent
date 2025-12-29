@@ -1,0 +1,16 @@
+# Requirements for Blockchain Schema Discovery Utility
+# Install with: pip install -r requirements-discovery.txt
+
+# AWS SDK
+boto3>=1.34.0
+
+# Parquet file handling
+pyarrow>=14.0.0
+
+# Optional: For enhanced CLI experience
+rich>=13.0.0  # Pretty terminal output
+click>=8.1.0  # Alternative CLI framework
+
+# Optional: For schema comparison and validation
+jsonschema>=4.20.0
+pyyaml>=6.0.1

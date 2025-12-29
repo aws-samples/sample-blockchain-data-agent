@@ -1,0 +1,628 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  AWS Public Blockchain Data Consumer Architecture with Automated Schema Discovery.
+  This template extends the base architecture with Glue Crawlers that automatically
+  discover and catalog new blockchain data schemas.
+
+Parameters:
+  S3Bucket:
+    Description: The S3 bucket with the AWS Public Blockchain Data
+    Type: String
+    Default: "aws-public-blockchain"
+  
+  SchemaVersion:
+    Type: String
+    Default: "v1.0"
+    Description: Default schema version for BTC/ETH
+  
+  SchemaVersionTON:
+    Type: String
+    Default: "v1.1"
+    Description: Schema version for TON blockchain
+  
+  CrawlerSchedule:
+    Type: String
+    Default: "cron(0 2 ? * SUN *)"
+    Description: Schedule for running crawlers (default weekly on Sunday at 2 AM UTC)
+  
+  EnableAutoCrawling:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enable automatic crawler scheduling
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Data Source Configuration"
+        Parameters:
+          - S3Bucket
+          - SchemaVersion
+          - SchemaVersionTON
+      - Label:
+          default: "Crawler Configuration"
+        Parameters:
+          - CrawlerSchedule
+          - EnableAutoCrawling
+
+Resources:
+  # ============================================================================
+  # S3 and Athena Resources
+  # ============================================================================
+  
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AthenaResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: ForceHTTPS
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub ${AthenaResultsBucket.Arn}/*
+              - !Sub ${AthenaResultsBucket.Arn}
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+      Bucket: !Ref AthenaResultsBucket
+
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: AWSPublicBlockchain
+      Description: AWS Public Blockchain Data
+      RecursiveDeleteOption: true
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        RequesterPaysEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Sub s3://${AthenaResultsBucket}/results/
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+
+  # ============================================================================
+  # IAM Roles for Glue Crawlers
+  # ============================================================================
+  
+  GlueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-GlueCrawlerRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${S3Bucket}
+                  - !Sub arn:aws:s3:::${S3Bucket}/*
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource:
+                  - !Sub ${AthenaResultsBucket.Arn}/*
+        - PolicyName: GlueCatalogPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:*Database*
+                  - glue:*Table*
+                  - glue:*Partition*
+                Resource:
+                  - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog
+                  - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*
+                  - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*/*
+
+  # ============================================================================
+  # Discovery Database - For New Blockchains
+  # ============================================================================
+  
+  GlueDatabaseDiscovery:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: blockchain_discovery
+        Description: >
+          Auto-discovered blockchain schemas. Tables here are created by crawlers
+          when new blockchain data is detected in the S3 bucket.
+
+  # ============================================================================
+  # Master Crawler - Discovers New Blockchains
+  # ============================================================================
+  
+  MasterBlockchainCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub ${AWS::StackName}-MasterBlockchainDiscovery
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref GlueDatabaseDiscovery
+      Description: >
+        Master crawler that scans the entire S3 bucket to discover new blockchain
+        namespaces and their data structures. Creates tables automatically.
+      Targets:
+        S3Targets:
+          - Path: !Sub s3://${S3Bucket}/
+            Exclusions:
+              # Exclude known blockchains to avoid duplication
+              - "v1.0/btc/**"
+              - "v1.0/eth/**"
+              - "v1.1/ton/**"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
+      Configuration: |
+        {
+          "Version": 1.0,
+          "CrawlerOutput": {
+            "Partitions": {"AddOrUpdateBehavior": "InheritFromTable"},
+            "Tables": {"AddOrUpdateBehavior": "MergeNewColumns"}
+          },
+          "Grouping": {
+            "TableGroupingPolicy": "CombineCompatibleSchemas"
+          }
+        }
+
+  # ============================================================================
+  # Per-Blockchain Crawlers (for existing chains)
+  # ============================================================================
+  
+  BTCBlockchainCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub ${AWS::StackName}-BTC-Crawler
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref GlueDatabaseBTC
+      Description: Crawler for Bitcoin blockchain data
+      Targets:
+        S3Targets:
+          - Path: !Sub s3://${S3Bucket}/${SchemaVersion}/btc/
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
+      Configuration: |
+        {
+          "Version": 1.0,
+          "CrawlerOutput": {
+            "Partitions": {"AddOrUpdateBehavior": "InheritFromTable"}
+          }
+        }
+
+  ETHBlockchainCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub ${AWS::StackName}-ETH-Crawler
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref GlueDatabaseETH
+      Description: Crawler for Ethereum blockchain data
+      Targets:
+        S3Targets:
+          - Path: !Sub s3://${S3Bucket}/${SchemaVersion}/eth/
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
+
+  TONBlockchainCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub ${AWS::StackName}-TON-Crawler
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref GlueDatabaseTON
+      Description: Crawler for TON blockchain data
+      Targets:
+        S3Targets:
+          - Path: !Sub s3://${S3Bucket}/${SchemaVersionTON}/ton/
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      RecrawlPolicy:
+        RecrawlBehavior: CRAWL_NEW_FOLDERS_ONLY
+
+  # ============================================================================
+  # Glue Databases (Existing Blockchains)
+  # ============================================================================
+  
+  GlueDatabaseBTC:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: btc
+        Description: Bitcoin blockchain data
+
+  GlueDatabaseETH:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: eth
+        Description: Ethereum blockchain data
+
+  GlueDatabaseTON:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: ton
+        Description: TON blockchain data
+
+  # ============================================================================
+  # EventBridge Rules for Scheduled Crawling
+  # ============================================================================
+  
+  MasterCrawlerSchedule:
+    Type: AWS::Events::Rule
+    Condition: EnableCrawling
+    Properties:
+      Name: !Sub ${AWS::StackName}-MasterCrawlerSchedule
+      Description: Schedule for master blockchain discovery crawler
+      ScheduleExpression: !Ref CrawlerSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/${MasterBlockchainCrawler}
+          Id: MasterCrawlerTarget
+          RoleArn: !GetAtt EventBridgeGlueRole.Arn
+
+  BTCCrawlerSchedule:
+    Type: AWS::Events::Rule
+    Condition: EnableCrawling
+    Properties:
+      Name: !Sub ${AWS::StackName}-BTCCrawlerSchedule
+      Description: Schedule for BTC crawler
+      ScheduleExpression: !Ref CrawlerSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/${BTCBlockchainCrawler}
+          Id: BTCCrawlerTarget
+          RoleArn: !GetAtt EventBridgeGlueRole.Arn
+
+  ETHCrawlerSchedule:
+    Type: AWS::Events::Rule
+    Condition: EnableCrawling
+    Properties:
+      Name: !Sub ${AWS::StackName}-ETHCrawlerSchedule
+      Description: Schedule for ETH crawler
+      ScheduleExpression: !Ref CrawlerSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/${ETHBlockchainCrawler}
+          Id: ETHCrawlerTarget
+          RoleArn: !GetAtt EventBridgeGlueRole.Arn
+
+  TONCrawlerSchedule:
+    Type: AWS::Events::Rule
+    Condition: EnableCrawling
+    Properties:
+      Name: !Sub ${AWS::StackName}-TONCrawlerSchedule
+      Description: Schedule for TON crawler
+      ScheduleExpression: !Ref CrawlerSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/${TONBlockchainCrawler}
+          Id: TONCrawlerTarget
+          RoleArn: !GetAtt EventBridgeGlueRole.Arn
+
+  # ============================================================================
+  # IAM Role for EventBridge to Start Crawlers
+  # ============================================================================
+  
+  EventBridgeGlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartGlueCrawler
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:StartCrawler
+                Resource:
+                  - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:crawler/*
+
+  # ============================================================================
+  # Lambda for Post-Crawler Processing
+  # ============================================================================
+  
+  CrawlerCompletionHandlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: GlueAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:GetCrawler
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:UpdateTable
+                  - glue:CreatePartition
+                  - glue:BatchCreatePartition
+                Resource: '*'
+        - PolicyName: SNSPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref CrawlerNotificationTopic
+
+  CrawlerCompletionHandler:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-CrawlerCompletionHandler
+      Description: Processes crawler completion events and sends notifications
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt CrawlerCompletionHandlerRole.Arn
+      Timeout: 300
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref CrawlerNotificationTopic
+          DISCOVERY_DATABASE: !Ref GlueDatabaseDiscovery
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          glue = boto3.client('glue')
+          sns = boto3.client('sns')
+          
+          def handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+              
+              crawler_name = event['detail']['crawlerName']
+              state = event['detail']['state']
+              
+              if state != 'Succeeded':
+                  print(f"Crawler {crawler_name} did not succeed. State: {state}")
+                  return
+              
+              # Get crawler details
+              crawler = glue.get_crawler(Name=crawler_name)
+              database_name = crawler['Crawler']['DatabaseName']
+              
+              # Get tables in the database
+              tables_response = glue.get_tables(DatabaseName=database_name)
+              tables = tables_response.get('TableList', [])
+              
+              # Build notification message
+              message_parts = [
+                  f"Crawler Completion Report",
+                  f"========================",
+                  f"Crawler: {crawler_name}",
+                  f"Database: {database_name}",
+                  f"Completion Time: {datetime.now().isoformat()}",
+                  f"",
+                  f"Discovered Tables: {len(tables)}",
+                  f""
+              ]
+              
+              for table in tables:
+                  table_name = table['Name']
+                  column_count = len(table['StorageDescriptor']['Columns'])
+                  location = table['StorageDescriptor']['Location']
+                  
+                  message_parts.append(f"  • {table_name}")
+                  message_parts.append(f"    - Columns: {column_count}")
+                  message_parts.append(f"    - Location: {location}")
+                  
+                  # Check if this is a new blockchain discovery
+                  if database_name == os.environ['DISCOVERY_DATABASE']:
+                      message_parts.append(f"    - ⚠️  NEW BLOCKCHAIN DETECTED!")
+                  
+                  message_parts.append("")
+              
+              message = "\n".join(message_parts)
+              
+              # Send SNS notification
+              sns.publish(
+                  TopicArn=os.environ['SNS_TOPIC_ARN'],
+                  Subject=f"Glue Crawler Completed: {crawler_name}",
+                  Message=message
+              )
+              
+              print(f"Notification sent for crawler: {crawler_name}")
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Processing complete')
+              }
+
+  # ============================================================================
+  # EventBridge Rule for Crawler State Changes
+  # ============================================================================
+  
+  CrawlerStateChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${AWS::StackName}-CrawlerStateChange
+      Description: Trigger Lambda when crawlers complete
+      EventPattern:
+        source:
+          - aws.glue
+        detail-type:
+          - Glue Crawler State Change
+        detail:
+          state:
+            - Succeeded
+            - Failed
+          crawlerName:
+            - prefix: !Ref AWS::StackName
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CrawlerCompletionHandler.Arn
+          Id: CrawlerCompletionHandlerTarget
+
+  CrawlerCompletionHandlerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CrawlerCompletionHandler
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CrawlerStateChangeRule.Arn
+
+  # ============================================================================
+  # SNS Topic for Notifications
+  # ============================================================================
+  
+  CrawlerNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-CrawlerNotifications
+      DisplayName: Blockchain Crawler Notifications
+      KmsMasterKeyId: alias/aws/sns
+
+  # ============================================================================
+  # SSM Parameters
+  # ============================================================================
+  
+  BucketNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /blockchain/s3-bucket
+      Description: AWS Public Blockchain S3 bucket
+      Type: String
+      Value: !Ref S3Bucket
+
+  SchemaVersionParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /blockchain/schema-version
+      Description: AWS Public Blockchain Schema Version
+      Type: String
+      Value: !Ref SchemaVersion
+
+  SchemaVersionParameterTON:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /blockchain/schema-version-ton
+      Description: AWS Public Blockchain Schema Version for TON
+      Type: String
+      Value: !Ref SchemaVersionTON
+
+  DiscoveryDatabaseParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /blockchain/discovery-database
+      Description: Glue database for discovered blockchains
+      Type: String
+      Value: !Ref GlueDatabaseDiscovery
+
+Conditions:
+  EnableCrawling: !Equals [!Ref EnableAutoCrawling, "true"]
+
+Outputs:
+  AthenaResultsBucket:
+    Description: S3 bucket for Athena query results
+    Value: !Ref AthenaResultsBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-AthenaResultsBucket
+
+  AthenaWorkgroup:
+    Description: Athena workgroup for blockchain queries
+    Value: !Ref AthenaWorkgroup
+    Export:
+      Name: !Sub ${AWS::StackName}-AthenaWorkgroup
+
+  MasterCrawlerName:
+    Description: Name of the master blockchain discovery crawler
+    Value: !Ref MasterBlockchainCrawler
+    Export:
+      Name: !Sub ${AWS::StackName}-MasterCrawler
+
+  DiscoveryDatabase:
+    Description: Glue database for auto-discovered blockchains
+    Value: !Ref GlueDatabaseDiscovery
+    Export:
+      Name: !Sub ${AWS::StackName}-DiscoveryDatabase
+
+  CrawlerNotificationTopicArn:
+    Description: SNS topic for crawler notifications
+    Value: !Ref CrawlerNotificationTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-NotificationTopic
+
+  GlueCrawlerRoleArn:
+    Description: IAM role ARN for Glue crawlers
+    Value: !GetAtt GlueCrawlerRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-CrawlerRole
+
+  BTCDatabase:
+    Description: Glue database for Bitcoin data
+    Value: !Ref GlueDatabaseBTC
+
+  ETHDatabase:
+    Description: Glue database for Ethereum data
+    Value: !Ref GlueDatabaseETH
+
+  TONDatabase:
+    Description: Glue database for TON data
+    Value: !Ref GlueDatabaseTON
