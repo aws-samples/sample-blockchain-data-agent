@@ -65,7 +65,7 @@ pip install -r requirements.txt
 
 ```bash
 # Automated deployment with Docker and Boto3
-python3 deploy_with_docker.py --agent-name "my_blockchain_data_agent" --region us-east-1
+python3 deploy_blockchain_agent.py --agent-name "my_blockchain_data_agent" --region us-east-1
 
 ```
 
