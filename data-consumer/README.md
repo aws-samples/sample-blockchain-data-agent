@@ -1,27 +1,17 @@
-# AWS Glue Crawler User Guide
-## Automatic Blockchain Schema Discovery
+# Blockchain Data Consumer Architecture
 
-Automatically discovers and catalogs blockchain data from the AWS Public Blockchain S3 bucket. When new blockchains are added, they're detected, dedicated databases are created, schemas are inferred, and Glue tables are created—all without manual intervention.
+CloudFormation templates for deploying the AWS infrastructure to consume and query blockchain data from the [AWS Public Blockchain Datasets](https://registry.opendata.aws/aws-public-blockchain/).
 
-**Key Benefits:**
-- Zero manual schema definition
-- Automatic discovery of new blockchains
-- Separate database per blockchain
-- Configurable per-chain crawler schedules (1min, 10min, hourly, daily)
-- Email notifications on discoveries
-- ~$2-5/month base cost
+## Templates
 
----
+| Template | Description |
+|----------|-------------|
+| `aws-public-blockchain-with-crawlers.yaml` | **Recommended** - Automatic schema discovery with Glue Crawlers |
+| `aws-public-blockchain.yaml` | Original template with pre-defined schemas |
 
 ## Quick Start
 
-### Prerequisites
-
-```bash
-aws configure
-```
-
-### 1. Deploy the Stack
+### Deploy with Automatic Schema Discovery (Recommended)
 
 ```bash
 aws cloudformation create-stack \
@@ -32,9 +22,13 @@ aws cloudformation create-stack \
 aws cloudformation wait stack-create-complete --stack-name blockchain-crawlers
 ```
 
-The stack automatically runs initial discovery on deployment, creating databases, crawlers, and schedules for all blockchains found in S3.
+The stack automatically:
+- Discovers all blockchains in the S3 bucket
+- Creates a dedicated database per blockchain (btc, eth, ton, etc.)
+- Creates and starts crawlers to infer schemas
+- Sets up configurable schedules per chain
 
-### 2. Subscribe to Notifications
+### Subscribe to Notifications
 
 ```bash
 TOPIC_ARN=$(aws cloudformation describe-stacks \
@@ -48,10 +42,9 @@ aws sns subscribe \
   --notification-endpoint your-email@example.com
 ```
 
-### 3. Query Data
+### Query Data in Athena
 
 ```sql
--- In Athena console
 SHOW DATABASES;
 SHOW TABLES IN btc;
 SELECT * FROM btc.blocks WHERE date = '2024-01-01' LIMIT 10;
@@ -94,17 +87,16 @@ SELECT * FROM btc.blocks WHERE date = '2024-01-01' LIMIT 10;
 
 ## Managing Crawler Schedules
 
-Each blockchain crawler has its own configurable schedule. Use the `CrawlerScheduleManager` Lambda to manage them.
+Each blockchain crawler has its own configurable schedule.
 
 ### Available Schedules
 
-| Schedule | Expression | Use Case |
-|----------|------------|----------|
-| `1min` | Every minute | Real-time monitoring (expensive) |
-| `10min` | Every 10 minutes | Near real-time |
-| `hourly` | Every hour | Balanced |
-| `daily` | Every day | Cost-effective (default) |
-| `disabled` | No schedule | Manual only |
+| Schedule | Expression | Est. Cost/Chain/Month |
+|----------|------------|----------------------|
+| `1min` | Every minute | $50-100+ |
+| `10min` | Every 10 minutes | $5-10 |
+| `hourly` | Every hour | $1-2 |
+| `daily` | Every day | $0.50 (default) |
 
 ### List All Schedules
 
@@ -112,18 +104,7 @@ Each blockchain crawler has its own configurable schedule. Use the `CrawlerSched
 aws lambda invoke \
   --function-name blockchain-crawlers-CrawlerScheduleManager \
   --payload '{"action": "list"}' \
-  response.json --no-cli-pager
-
-cat response.json
-```
-
-### Get Schedule for a Blockchain
-
-```bash
-aws lambda invoke \
-  --function-name blockchain-crawlers-CrawlerScheduleManager \
-  --payload '{"action": "get", "blockchain": "BTC"}' \
-  response.json --no-cli-pager
+  response.json --no-cli-pager && cat response.json
 ```
 
 ### Set Schedule for a Blockchain
@@ -133,27 +114,6 @@ aws lambda invoke \
 aws lambda invoke \
   --function-name blockchain-crawlers-CrawlerScheduleManager \
   --payload '{"action": "set", "blockchain": "BTC", "schedule": "hourly"}' \
-  response.json --no-cli-pager
-
-# Set ETH to every 10 minutes
-aws lambda invoke \
-  --function-name blockchain-crawlers-CrawlerScheduleManager \
-  --payload '{"action": "set", "blockchain": "ETH", "schedule": "10min"}' \
-  response.json --no-cli-pager
-
-# Set TON to daily
-aws lambda invoke \
-  --function-name blockchain-crawlers-CrawlerScheduleManager \
-  --payload '{"action": "set", "blockchain": "TON", "schedule": "daily"}' \
-  response.json --no-cli-pager
-```
-
-### Disable Schedule (Manual Only)
-
-```bash
-aws lambda invoke \
-  --function-name blockchain-crawlers-CrawlerScheduleManager \
-  --payload '{"action": "disable", "blockchain": "TON"}' \
   response.json --no-cli-pager
 ```
 
@@ -176,92 +136,9 @@ aws glue start-crawler --name blockchain-crawlers-BTC-Crawler
 | `DefaultCrawlerSchedule` | daily | Default schedule for new crawlers |
 | `EnableAutoCrawling` | true | Enable/disable automatic scheduling |
 
-### Deploy with Custom Settings
-
-```bash
-aws cloudformation create-stack \
-  --stack-name blockchain-crawlers \
-  --template-body file://data-consumer/aws-public-blockchain-with-crawlers.yaml \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameters \
-    ParameterKey=DefaultCrawlerSchedule,ParameterValue=hourly \
-    ParameterKey=DiscoverySchedule,ParameterValue="cron(0 0 * * ? *)"
-```
-
 ---
 
-## Cost Considerations
+## Documentation
 
-| Schedule | Crawler Runs/Month | Est. Cost/Chain |
-|----------|-------------------|-----------------|
-| 1min | 43,200 | $50-100+ |
-| 10min | 4,320 | $5-10 |
-| hourly | 720 | $1-2 |
-| daily | 30 | $0.50 |
-
-**Recommendations:**
-- Use `daily` for most chains (default)
-- Use `hourly` for chains you actively query
-- Use `10min` or `1min` only for real-time requirements
-- Disable schedules for chains you don't need
-
----
-
-## Troubleshooting
-
-### Crawler Not Running
-
-```bash
-# Check crawler state
-aws glue get-crawler --name blockchain-crawlers-BTC-Crawler \
-  --query 'Crawler.State' --no-cli-pager
-
-# Check schedule exists
-aws lambda invoke \
-  --function-name blockchain-crawlers-CrawlerScheduleManager \
-  --payload '{"action": "get", "blockchain": "BTC"}' \
-  response.json --no-cli-pager
-```
-
-### No Tables After Crawler Run
-
-```bash
-# Check crawler logs
-aws logs tail /aws-glue/crawlers --follow
-
-# Verify S3 data exists
-aws s3 ls s3://aws-public-blockchain/v1.0/btc/ --request-payer requester
-```
-
-### Discovery Not Finding New Chains
-
-```bash
-# Check discovery Lambda logs
-aws logs tail /aws/lambda/blockchain-crawlers-BlockchainDiscovery --follow
-
-# Manually trigger discovery
-aws lambda invoke \
-  --function-name blockchain-crawlers-BlockchainDiscovery \
-  --payload '{}' \
-  response.json --no-cli-pager
-```
-
----
-
-## Lambda Functions
-
-| Function | Purpose |
-|----------|---------|
-| `BlockchainDiscovery` | Discovers chains, creates DBs/crawlers/schedules |
-| `CrawlerScheduleManager` | Manages per-chain crawler schedules |
-| `CrawlerCompletionHandler` | Sends notifications on crawler completion |
-
----
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `data-consumer/aws-public-blockchain-with-crawlers.yaml` | CloudFormation template |
-| `utils/blockchain_schema_discovery.py` | Python utility for manual exploration |
-| `docs/CRAWLER_DESIGN.md` | Architecture documentation |
+- [Crawler Design](../docs/CRAWLER_DESIGN.md) - Architecture and implementation details
+- [Crawler User Guide](../docs/CRAWLER_README.md) - Detailed usage and troubleshooting

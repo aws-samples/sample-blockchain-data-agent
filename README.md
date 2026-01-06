@@ -2,6 +2,26 @@
 
 This project demonstrates how to build an intelligent blockchain data analysis agent using the [Strands Agents](https://strandsagents.com) framework with the Model Context Protocol (MCP) to integrate with the `awslabs.aws-dataprocessing-mcp-server`.
 
+## 📁 Project Structure
+
+```
+├── agentcore-deployment/     # Agent deployment to Amazon Bedrock AgentCore
+│   ├── deploy_blockchain_agent.py
+│   ├── invoke_agent_async.py
+│   └── ...
+├── data-consumer/            # CloudFormation templates for data infrastructure
+│   ├── aws-public-blockchain-with-crawlers.yaml  # Recommended (auto-discovery)
+│   ├── aws-public-blockchain.yaml                # Original (pre-defined schemas)
+│   └── README.md
+├── docs/                     # Documentation
+│   ├── CRAWLER_DESIGN.md
+│   ├── CRAWLER_README.md
+│   └── ...
+└── utils/                    # Utility scripts
+    ├── blockchain_schema_discovery.py
+    └── ...
+```
+
 ## 🚀 Features
 
 - **Intelligent AWS Data Processing**: Leverage AI to help with AWS data processing tasks
@@ -28,11 +48,13 @@ This project demonstrates how to build an intelligent blockchain data analysis a
 #deploys data infra to give your agent access to data from the AWS Public Blockchain Datasets
 aws cloudformation create-stack \
   --stack-name blockchain-crawlers \
-  --template-body file://utils/aws-public-blockchain-with-crawlers.yaml \
+  --template-body file://data-consumer/aws-public-blockchain-with-crawlers.yaml \
   --capabilities CAPABILITY_NAMED_IAM
 
 aws cloudformation wait stack-create-complete --stack-name blockchain-crawlers
 ```
+
+See [data-consumer/README.md](data-consumer/README.md) for detailed configuration options.
 
 ### 1. Install Dependencies
 
