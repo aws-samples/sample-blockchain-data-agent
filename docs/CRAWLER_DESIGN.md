@@ -3,7 +3,7 @@
 
 ### Overview
 
-This document describes the architecture of the automated blockchain schema discovery solution. The system automatically discovers new blockchain namespaces in the AWS Public Blockchain S3 bucket, creates dedicated databases per blockchain, infers schemas from Parquet metadata, creates crawlers, and sets up configurable schedules.
+This document describes the architecture of the automated blockchain schema discovery solution. The system automatically discovers new blockchain namespaces in the AWS Public Blockchain S3 bucket, creates dedicated databases per blockchain, infers schemas from Parquet metadata, and creates crawlers with built-in schedules.
 
 ---
 
@@ -11,9 +11,9 @@ This document describes the architecture of the automated blockchain schema disc
 
 1. **Zero-Touch Discovery**: Automatically detect and catalog new blockchains
 2. **Database Per Blockchain**: Each blockchain gets its own dedicated Glue database
-3. **Configurable Schedules**: Per-chain crawler schedules (1min, 10min, hourly, daily)
+3. **Native Scheduling**: Use Glue's built-in crawler scheduling (cron expressions)
 4. **Cost Optimization**: Default to daily crawls, allow fine-tuning per chain
-5. **Extensibility**: Support any blockchain structure without code changes
+5. **Simplicity**: Minimal Lambda functions, leverage AWS native features
 
 ---
 
@@ -29,35 +29,26 @@ This document describes the architecture of the automated blockchain schema disc
 │              BlockchainDiscoveryFunction (Lambda)            │
 │  1. Scans S3 for blockchain namespaces                      │
 │  2. Creates Glue database per blockchain                    │
-│  3. Creates Glue crawler per blockchain                     │
-│  4. Creates EventBridge schedule per crawler                │
-│  5. Starts crawlers on first creation                       │
+│  3. Creates Glue crawler with built-in schedule             │
+│  4. Starts crawlers on first creation                       │
 └─────────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────────┐
-│              CrawlerScheduleManager (Lambda)                 │
-│  - List all schedules                                       │
-│  - Get/Set schedule per blockchain                          │
-│  - Disable schedules                                        │
-└─────────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│              EventBridge Schedules (per chain)               │
-│  {stack}-BTC-Schedule: rate(1 day)                         │
-│  {stack}-ETH-Schedule: rate(1 hour)                        │
-│  {stack}-TON-Schedule: rate(10 minutes)                    │
-└─────────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────────┐
-│                    AWS Glue Crawlers                         │
-│  {stack}-BTC-Crawler → btc database                        │
-│  {stack}-ETH-Crawler → eth database                        │
-│  {stack}-TON-Crawler → ton database                        │
+│           AWS Glue Crawlers (with native scheduling)         │
+│  {stack}-BTC-Crawler → btc database (daily)                │
+│  {stack}-ETH-Crawler → eth database (daily)                │
+│  {stack}-TON-Crawler → ton database (daily)                │
 └─────────────────────────────────────────────────────────────┘
                           ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                  AWS Glue Data Catalog                       │
 │       btc  |  eth  |  ton  |  (auto-created)               │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│              CrawlerCompletionHandler (Lambda)               │
+│  - Triggered by Glue crawler state changes                  │
+│  - Sends SNS notifications on completion                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -72,13 +63,13 @@ This document describes the architecture of the automated blockchain schema disc
 **Trigger**: 
 - EventBridge schedule (weekly by default)
 - Manual invocation
+- CloudFormation custom resource (on stack creation)
 
 **Process**:
 1. Scan S3 bucket for blockchain namespaces (v1.0/*, v1.1/*)
 2. For each discovered blockchain:
    - Create Glue database if not exists
-   - Create Glue crawler if not exists
-   - Create EventBridge schedule if crawler is new
+   - Create Glue crawler with built-in schedule if not exists
    - Start crawler on first creation
 3. Send SNS notification with discovery report
 
@@ -89,51 +80,41 @@ This document describes the architecture of the automated blockchain schema disc
 - `CRAWLER_ROLE_ARN`: IAM role for crawlers
 - `STACK_NAME`: CloudFormation stack name
 - `SNS_TOPIC_ARN`: Notification topic
-- `DEFAULT_CRAWLER_SCHEDULE`: Default schedule (1min/10min/hourly/daily)
-- `EVENTBRIDGE_ROLE_ARN`: Role for EventBridge to start crawlers
-
-### 2. CrawlerScheduleManager
-
-**Purpose**: Manage per-chain crawler schedules
-
-**Actions**:
-- `list`: List all crawler schedules
-- `get`: Get schedule for specific blockchain
-- `set`: Set schedule (1min, 10min, hourly, daily)
-- `disable`: Remove schedule (manual-only mode)
+- `DEFAULT_CRAWLER_SCHEDULE`: Default schedule (1min/10min/hourly/daily/disabled)
 
 **Schedule Mapping**:
 ```python
 SCHEDULE_MAP = {
-    '1min': 'rate(1 minute)',
-    '10min': 'rate(10 minutes)',
-    'hourly': 'rate(1 hour)',
-    'daily': 'rate(1 day)'
+    '1min': 'cron(0/1 * * * ? *)',
+    '10min': 'cron(0/10 * * * ? *)',
+    'hourly': 'cron(0 * * * ? *)',
+    'daily': 'cron(0 0 * * ? *)',
+    'disabled': None
 }
 ```
 
-### 3. EventBridge Schedules
+### 2. CrawlerCompletionHandler
 
-**Naming**: `{stack-name}-{BLOCKCHAIN}-Schedule`
+**Purpose**: Send notifications when crawlers complete
 
-**Target**: Glue crawler ARN with EventBridgeGlueRole
+**Trigger**: EventBridge rule on Glue Crawler State Change events
 
-**States**: ENABLED or deleted (for disabled)
+**Process**:
+1. Receive crawler completion event
+2. Query Glue for crawler and table details
+3. Send SNS notification with discovered tables
 
-### 4. Glue Crawlers
+### 3. Glue Crawlers
 
 **Naming**: `{stack-name}-{BLOCKCHAIN}-Crawler`
 
 **Configuration**:
+- `Schedule`: Cron expression set at creation time
 - `RecrawlBehavior`: CRAWL_NEW_FOLDERS_ONLY (cost optimization)
-- `UpdateBehavior`: UPDATE_IN_DATABASE
-- `DeleteBehavior`: LOG
+- `SchemaChangePolicy.UpdateBehavior`: LOG (required for CRAWL_NEW_FOLDERS_ONLY)
+- `SchemaChangePolicy.DeleteBehavior`: LOG (required for CRAWL_NEW_FOLDERS_ONLY)
 
-### 5. EventBridgeGlueRole
-
-**Purpose**: Allow EventBridge to start Glue crawlers
-
-**Permissions**: `glue:StartCrawler` on stack crawlers
+**Note**: When using `CRAWL_NEW_FOLDERS_ONLY`, AWS Glue requires both `UpdateBehavior` and `DeleteBehavior` to be set to `LOG`.
 
 ---
 
@@ -149,8 +130,7 @@ SCHEDULE_MAP = {
    
 3. Creates resources:
    - Database: sol
-   - Crawler: {stack}-SOL-Crawler
-   - Schedule: {stack}-SOL-Schedule (daily by default)
+   - Crawler: {stack}-SOL-Crawler (with daily schedule)
    
 4. Starts crawler immediately
 
@@ -163,59 +143,62 @@ SCHEDULE_MAP = {
    SELECT * FROM sol.blocks LIMIT 10;
 ```
 
-### Schedule Change
+### Schedule Management
 
-```
-1. User invokes CrawlerScheduleManager:
-   {"action": "set", "blockchain": "SOL", "schedule": "hourly"}
+Schedules are managed directly via AWS CLI or Console:
 
-2. Lambda updates EventBridge rule:
-   - Rule: {stack}-SOL-Schedule
-   - Expression: rate(1 hour)
-   
-3. Crawler now runs hourly
+```bash
+# Update to hourly
+aws glue update-crawler \
+  --name {stack}-SOL-Crawler \
+  --schedule "cron(0 * * * ? *)"
+
+# Disable schedule
+aws glue update-crawler \
+  --name {stack}-SOL-Crawler \
+  --schedule ""
 ```
 
 ---
 
 ## Design Decisions
 
-### 1. Per-Chain Schedules
+### 1. Native Glue Scheduling
 
-**Decision**: Each blockchain has its own configurable schedule
-
-**Rationale**:
-- Different chains have different update frequencies
-- Cost optimization (don't over-crawl inactive chains)
-- Flexibility for real-time vs batch use cases
-
-### 2. EventBridge for Scheduling
-
-**Decision**: Use EventBridge rules instead of Glue native scheduling
+**Decision**: Use Glue's built-in crawler scheduling instead of EventBridge
 
 **Rationale**:
-- Dynamic creation/modification via API
-- Consistent naming convention
-- Easy to list/manage all schedules
-- Can be disabled without deleting crawler
+- Simpler architecture (no separate EventBridge rules)
+- Schedule is set at crawler creation time
+- Standard AWS tooling for management (Console, CLI)
+- Fewer IAM roles and permissions required
 
-### 3. Default Daily Schedule
+### 2. Default Daily Schedule
 
 **Decision**: New crawlers default to daily
 
 **Rationale**:
 - Cost-effective baseline
 - Blockchain data is append-only (historical doesn't change)
-- Users can upgrade specific chains as needed
+- Users can upgrade specific chains as needed via CLI
 
-### 4. Discovery Creates Schedules
+### 3. CRAWL_NEW_FOLDERS_ONLY with LOG Policies
 
-**Decision**: Discovery Lambda creates schedules for new crawlers only
+**Decision**: Use incremental crawling with LOG-only schema policies
 
 **Rationale**:
-- Existing schedules are preserved (user customizations)
-- New chains get sensible defaults
-- Idempotent operation
+- Cost optimization (only crawl new data)
+- AWS requirement: CRAWL_NEW_FOLDERS_ONLY requires LOG for both UpdateBehavior and DeleteBehavior
+- Schema changes are logged but don't modify existing tables
+
+### 4. No Separate Schedule Manager Lambda
+
+**Decision**: Remove dedicated Lambda for schedule management
+
+**Rationale**:
+- AWS CLI/Console provides same functionality
+- Reduces complexity and maintenance
+- Fewer resources to deploy and monitor
 
 ---
 
@@ -235,7 +218,7 @@ SCHEDULE_MAP = {
 - **Production**: Use `daily` for most chains
 - **Active development**: Use `hourly` for chains under active query
 - **Real-time dashboards**: Use `10min` or `1min` (monitor costs)
-- **Inactive chains**: Use `disable` and trigger manually
+- **Inactive chains**: Disable schedule and trigger manually
 
 ---
 
@@ -246,13 +229,12 @@ SCHEDULE_MAP = {
 | Role | Purpose | Key Permissions |
 |------|---------|-----------------|
 | GlueCrawlerRole | Crawler execution | S3 read, Glue catalog |
-| BlockchainDiscoveryRole | Discovery Lambda | S3 list, Glue create, Events create |
-| CrawlerScheduleManagerRole | Schedule Lambda | Events CRUD |
-| EventBridgeGlueRole | Start crawlers | glue:StartCrawler |
+| BlockchainDiscoveryRole | Discovery Lambda | S3 list, Glue create/start |
+| CrawlerCompletionHandlerRole | Completion Lambda | Glue read, SNS publish |
 
 ### Resource Scoping
 
-All EventBridge rules and crawlers are scoped to `{stack-name}-*` pattern.
+All crawlers are scoped to `{stack-name}-*` pattern.
 
 ---
 
@@ -260,15 +242,16 @@ All EventBridge rules and crawlers are scoped to `{stack-name}-*` pattern.
 
 ### Adding Custom Schedules
 
-Modify `SCHEDULE_MAP` in both Lambdas:
+Modify `SCHEDULE_MAP` in BlockchainDiscoveryFunction:
 ```python
 SCHEDULE_MAP = {
-    '1min': 'rate(1 minute)',
-    '5min': 'rate(5 minutes)',  # Add new option
-    '10min': 'rate(10 minutes)',
-    'hourly': 'rate(1 hour)',
-    'daily': 'rate(1 day)',
-    'weekly': 'rate(7 days)'  # Add new option
+    '1min': 'cron(0/1 * * * ? *)',
+    '5min': 'cron(0/5 * * * ? *)',  # Add new option
+    '10min': 'cron(0/10 * * * ? *)',
+    'hourly': 'cron(0 * * * ? *)',
+    'daily': 'cron(0 0 * * ? *)',
+    'weekly': 'cron(0 0 ? * SUN *)',  # Add new option
+    'disabled': None
 }
 ```
 
@@ -284,10 +267,11 @@ Extend `CrawlerCompletionHandler` to:
 
 ## Limitations
 
-1. **Minimum schedule**: 1 minute (EventBridge limit)
+1. **Minimum schedule**: 1 minute (Glue cron limit)
 2. **Parquet only**: Assumes data is in Parquet format
 3. **S3 structure**: Assumes `{version}/{blockchain}/` structure
 4. **Concurrent crawlers**: AWS Glue has soft limits on concurrent crawlers
+5. **Schema changes**: With CRAWL_NEW_FOLDERS_ONLY, schema changes are logged but not applied
 
 ---
 
@@ -297,13 +281,11 @@ Extend `CrawlerCompletionHandler` to:
 
 - Crawler: `glue.driver.aggregate.numBytes`, `elapsedTime`
 - Lambda: `Invocations`, `Errors`, `Duration`
-- EventBridge: `TriggeredRules`, `FailedInvocations`
 
 ### Logs
 
 - `/aws-glue/crawlers` - Crawler execution
 - `/aws/lambda/{stack}-BlockchainDiscovery` - Discovery
-- `/aws/lambda/{stack}-CrawlerScheduleManager` - Schedule changes
 - `/aws/lambda/{stack}-CrawlerCompletionHandler` - Completions
 
 ### Alerts
