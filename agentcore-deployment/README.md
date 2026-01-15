@@ -54,17 +54,24 @@ agentcore-deployment/
 
 ## 🚀 Quick Start
 
-### 0. Deploy the Blockchain Data Consumer Architecture via CloudFormation
+### 0. Deploy the Blockchain Data Consumer Architecture via CloudFormation (Separate Repo)
 Your blockchain data agent will need access to public blockchain data for analysis. This data can be sourced from a variety of places, such as APIs or your own indexed data repositories. In this example, we provide a deployable architecture that gives your agent access to indexed public blockchain data from the [AWS Public Blockchain Datasets](https://registry.opendata.aws/aws-public-blockchain/). 
 
 ```bash
+# Clone the sample-public-blockchain-data-consumer repository
+git clone https://github.com/aws-samples/sample-public-blockchain-data-consumer.git
+cd sample-public-blockchain-data-consumer
+
+# Deploy data infrastructure
 aws cloudformation create-stack \
   --stack-name blockchain-crawlers \
-  --template-body file://utils/aws-public-blockchain-with-crawlers.yaml \
+  --template-body file://aws-public-blockchain-with-crawlers.yaml \
   --capabilities CAPABILITY_NAMED_IAM
 
 aws cloudformation wait stack-create-complete --stack-name blockchain-crawlers
 ```
+
+See [Public Blockchain Data Consumer Stack Documentation](https://github.com/aws-samples/sample-public-blockchain-data-consumer/blob/main/README.md) for detailed configuration options.
 
 
 ### 1. Install Dependencies

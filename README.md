@@ -6,19 +6,17 @@ This project demonstrates how to build an intelligent blockchain data analysis a
 
 ```
 ├── agentcore-deployment/     # Agent deployment to Amazon Bedrock AgentCore
+│   ├── blockchain_agent_agentcore.py
 │   ├── deploy_blockchain_agent.py
 │   ├── invoke_agent_async.py
 │   └── ...
-├── data-consumer/            # CloudFormation templates for data infrastructure
-│   ├── aws-public-blockchain-with-crawlers.yaml  # Recommended (auto-discovery)
-│   ├── aws-public-blockchain.yaml                # Original (pre-defined schemas)
-│   └── README.md
 ├── docs/                     # Documentation
-│   ├── CRAWLER_DESIGN.md
-│   ├── CRAWLER_README.md
+│   ├── DOCKER_DEPLOYMENT_README.md
+│   ├── SAMPLE_PROMPTS.md
+│   ├── architecture-diagram.md
 │   └── ...
 └── utils/                    # Utility scripts
-    ├── blockchain_schema_discovery.py
+    ├── mcp_utils.py
     └── ...
 ```
 
@@ -42,19 +40,23 @@ This project demonstrates how to build an intelligent blockchain data analysis a
 - **Docker** installed with Buildx add-on
 - **Blockchain Data Consumer Architecture** deployed to give your agent access to data from the [AWS Public Blockchain Datasets](https://registry.opendata.aws/aws-public-blockchain/) (see step 0. below)
 
-### 0. Deploy the Blockchain Data Consumer Architecture via CloudFormation
+### 0. Deploy the Blockchain Data Consumer Architecture via CloudFormation (Separate Repo)
 
 ```bash
-#deploys data infra to give your agent access to data from the AWS Public Blockchain Datasets
+# Clone the sample-public-blockchain-data-consumer repository
+git clone https://github.com/aws-samples/sample-public-blockchain-data-consumer.git
+cd sample-public-blockchain-data-consumer
+
+# Deploy data infrastructure to give your agent access to data from the AWS Public Blockchain Datasets
 aws cloudformation create-stack \
   --stack-name blockchain-crawlers \
-  --template-body file://data-consumer/aws-public-blockchain-with-crawlers.yaml \
+  --template-body file://aws-public-blockchain-with-crawlers.yaml \
   --capabilities CAPABILITY_NAMED_IAM
 
 aws cloudformation wait stack-create-complete --stack-name blockchain-crawlers
 ```
 
-See [data-consumer/README.md](data-consumer/README.md) for detailed configuration options.
+See [Public Blockchain Data Consumer Stack Documentation](https://github.com/aws-samples/sample-public-blockchain-data-consumer/blob/main/README.md) for detailed configuration options.
 
 ### 1. Install Dependencies
 
