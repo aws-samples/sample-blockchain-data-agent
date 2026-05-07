@@ -102,20 +102,20 @@
       ]
     },
     {
-        "Sid": "CloudWatchLogsAccess",
-        "Effect": "Allow",
-        "Action": [
-            "logs:GetLogEvents",
-            "logs:DescribeLogGroups",
-            "logs:DescribeLogStreams",
-            "logs:CreateLogGroup",
-            "logs:CreateLogStream",
-            "logs:PutLogEvents"
-        ],
-        "Resource": [
-            "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/*",
-            "arn:aws:logs:*:*:log-group:/aws/codebuild/*"
-        ]
+      "Sid": "CloudWatchLogsAccess",
+      "Effect": "Allow",
+      "Action": [
+        "logs:GetLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": [
+        "arn:aws:logs:*:*:log-group:/aws/bedrock-agentcore/*",
+        "arn:aws:logs:*:*:log-group:/aws/codebuild/*"
+      ]
     },
     {
       "Sid": "CreateBedrockAgentCoreRuntimeIdentityServiceLinkedRolePermissions",
@@ -129,85 +129,85 @@
       }
     },
     {
-        "Sid": "AllowAnthropicAndAmazonModelsOnly",
-        "Effect": "Allow",
-        "Action": [
-            "bedrock:InvokeModel",
-            "bedrock:InvokeModelWithResponseStream"
-        ],
-        "Resource": [
-            "arn:aws:bedrock:*:*:inference-profile/us.anthropic.claude-sonnet-4-20250514-v1:0",
-            "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0"
-        ]
-      },
-      {
-        "Sid": "GrantGlobalCrisInferenceProfileRegionAccess",
-        "Effect": "Allow",
-        "Action": [
-            "bedrock:InvokeModel",
-            "bedrock:InvokeModelWithResponseStream"
-        ],
-        "Resource": [
-            "arn:aws:bedrock:us-east-1:*:inference-profile/global.anthropic.claude-sonnet-4-20250514-v1:0"
-        ],
-        "Condition": {
-            "StringEquals": {
-                "aws:RequestedRegion": "us-east-1"
-            }
-        }
-      },
-      {
-        "Sid": "GrantGlobalCrisInferenceProfileInRegionModelAccess",
-        "Effect": "Allow",
-        "Action": [
-            "bedrock:InvokeModel",
-            "bedrock:InvokeModelWithResponseStream"
-        ],
-        "Resource": [
-            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0"
-        ],
-        "Condition": {
-            "StringEquals": {
-                "aws:RequestedRegion": "us-east-1",
-                "bedrock:InferenceProfileArn": "arn:aws:bedrock:us-east-1:*:inference-profile/global.anthropic.claude-sonnet-4-20250514-v1:0"
-            }
-        }
-      },
-      {
-        "Sid": "GrantGlobalCrisInferenceProfileGlobalModelAccess",
-        "Effect": "Allow",
-        "Action": [
-            "bedrock:InvokeModel",
-            "bedrock:InvokeModelWithResponseStream"
-        ],
-        "Resource": [
-            "arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-4-20250514-v1:0"
-        ],
-        "Condition": {
-            "StringEquals": {
-                "aws:RequestedRegion": "unspecified",
-                "bedrock:InferenceProfileArn": "arn:aws:bedrock:us-east-1:*:inference-profile/global.anthropic.claude-sonnet-4-20250514-v1:0"
-            }
-        }
-      },
-      {
-        "Sid": "AllowOnlySpecificMarketplaceSubscription",
-        "Effect": "Allow",
-        "Action": [
-            "aws-marketplace:ViewSubscriptions",
-            "aws-marketplace:Subscribe"
-        ],
-        "Resource": "*",
-        "Condition": {
-            "ForAllValues:StringEquals": {
-                "aws-marketplace:ProductId": [
-                    "prod-4pmewlybdftbs"
-                ]
-            },
-            "StringEquals": {
-                "aws:CalledViaLast": "bedrock.amazonaws.com"
-            }
+      "Sid": "AllowAnthropicAndAmazonModelsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:*:*:inference-profile/us.anthropic.claude-sonnet-4-6",
+        "arn:aws:bedrock:*::foundation-model/anthropic.anthropic.claude-sonnet-4-6"
+      ]
+    },
+    {
+      "Sid": "GrantGlobalCrisInferenceProfileRegionAccess",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:us-east-1:*:inference-profile/global.anthropic.claude-sonnet-4-6"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
         }
       }
-    ]
+    },
+    {
+      "Sid": "GrantGlobalCrisInferenceProfileInRegionModelAccess",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:us-east-1::foundation-model/.anthropic.claude-sonnet-4-6"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1",
+          "bedrock:InferenceProfileArn": "arn:aws:bedrock:us-east-1:*:inference-profile/global.anthropic.claude-sonnet-4-6"
+        }
+      }
+    },
+    {
+      "Sid": "GrantGlobalCrisInferenceProfileGlobalModelAccess",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-4-6"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "unspecified",
+          "bedrock:InferenceProfileArn": "arn:aws:bedrock:us-east-1:*:inference-profile/global.anthropic.claude-sonnet-4-6"
+        }
+      }
+    },
+    {
+      "Sid": "AllowOnlySpecificMarketplaceSubscription",
+      "Effect": "Allow",
+      "Action": [
+        "aws-marketplace:ViewSubscriptions",
+        "aws-marketplace:Subscribe"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ForAllValues:StringEquals": {
+          "aws-marketplace:ProductId": [
+            "prod-4pmewlybdftbs"
+          ]
+        },
+        "StringEquals": {
+          "aws:CalledViaLast": "bedrock.amazonaws.com"
+        }
+      }
+    }
+  ]
 }
